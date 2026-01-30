@@ -9,14 +9,14 @@ const server = app.listen(PORT, () => {
   console.log(`
   ╔════════════════════════════════════════════════════╗
   ║                                                    ║
-  ║   🎓 School Management System API Server          ║
+  ║   🎓 School Management System API Server           ║
   ║                                                    ║
   ║   Environment: ${config.nodeEnv.padEnd(35)}║
   ║   Port: ${PORT.toString().padEnd(42)}║
   ║   Database: Connected ✅                           ║
   ║                                                    ║
-  ║   API: http://localhost:${PORT}/api                  ║
-  ║   Health: http://localhost:${PORT}/health            ║
+  ║   API: http://localhost:${PORT}/api                ║
+  ║   Health: http://localhost:${PORT}/health          ║
   ║                                                    ║
   ╚════════════════════════════════════════════════════╝
   `);
