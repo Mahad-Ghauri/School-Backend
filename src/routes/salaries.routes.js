@@ -31,6 +31,9 @@ router.get('/stats', staffOnly, salariesController.getStats);
 // Get voucher by ID (staff can view)
 router.get('/voucher/:id', staffOnly, salariesController.getVoucherById);
 
+// Download salary slip as PDF (staff can download)
+router.get('/voucher/:id/pdf', staffOnly, salariesController.downloadPDF);
+
 // Add adjustment to voucher (admin only)
 router.post('/voucher/:id/adjustment', adminOnly, salariesController.addAdjustment);
 

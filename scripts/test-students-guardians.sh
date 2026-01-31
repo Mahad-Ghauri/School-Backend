@@ -148,7 +148,7 @@ STUDENT_RESPONSE=$(curl -s -X POST "$API_URL/students" \
     "date_of_birth": "2010-05-15",
     "bay_form": "4210111111111",
     "address": "House 123, Street 45, Karachi",
-    "previous_school": "ABC School"
+    "previous_school": "Muslim School"
   }')
 
 echo "$STUDENT_RESPONSE" | python3 -m json.tool

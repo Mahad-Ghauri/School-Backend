@@ -25,6 +25,9 @@ router.get('/', staffOnly, vouchersController.list);
 // Get voucher by ID with complete details (staff can view)
 router.get('/:id', staffOnly, vouchersController.getById);
 
+// Download voucher as PDF (staff can download)
+router.get('/:id/pdf', staffOnly, vouchersController.downloadPDF);
+
 // Update voucher items (admin only)
 router.put('/:id/items', adminOnly, vouchersController.updateItems);
 
