@@ -18,6 +18,7 @@ const salariesRoutes = require('./routes/salaries.routes');
 const expensesRoutes = require('./routes/expenses.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
+const documentsRoutes = require('./routes/documents.routes');
 
 const app = express();
 
@@ -67,6 +68,7 @@ app.use('/api/salaries', salariesRoutes);
 app.use('/api/expenses', expensesRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api', documentsRoutes);
 
 // 404 handler
 app.use(notFoundHandler);
