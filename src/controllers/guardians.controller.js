@@ -7,6 +7,15 @@ const Joi = require('joi');
  * Manages guardian information and relationships with students
  */
 class GuardiansController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.create = this.create.bind(this);
+    this.list = this.list.bind(this);
+    this.getById = this.getById.bind(this);
+    this.update = this.update.bind(this);
+    this.delete = this.delete.bind(this);
+  }
+
   /**
    * Create or link guardian to student
    * POST /api/guardians

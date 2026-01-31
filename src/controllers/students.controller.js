@@ -8,6 +8,16 @@ const Joi = require('joi');
  * Handles all edge cases and validations
  */
 class StudentsController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.create = this.create.bind(this);
+    this.list = this.list.bind(this);
+    this.getById = this.getById.bind(this);
+    this.update = this.update.bind(this);
+    this.enroll = this.enroll.bind(this);
+    this.withdraw = this.withdraw.bind(this);
+  }
+
   /**
    * Create new student with guardians and enrollment
    * POST /api/students

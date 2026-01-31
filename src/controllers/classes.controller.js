@@ -7,6 +7,17 @@ const Joi = require('joi');
  * Manages classes and their fee structures
  */
 class ClassesController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.create = this.create.bind(this);
+    this.list = this.list.bind(this);
+    this.getById = this.getById.bind(this);
+    this.update = this.update.bind(this);
+    this.delete = this.delete.bind(this);
+    this.updateFeeStructure = this.updateFeeStructure.bind(this);
+    this.getFeeHistory = this.getFeeHistory.bind(this);
+  }
+
   /**
    * Create a new class
    * POST /api/classes
