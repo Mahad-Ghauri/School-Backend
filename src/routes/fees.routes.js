@@ -1,13 +1,46 @@
 const express = require('express');
 const router = express.Router();
+const feesController = require('../controllers/fees.controller');
 const { authenticate } = require('../middleware/auth.middleware');
-const { staffOnly } = require('../middleware/role.middleware');
+const { adminOnly, staffOnly } = require('../middleware/role.middleware');
 
+// All routes require authentication
 router.use(authenticate);
-router.use(staffOnly);
 
-router.get('/', (req, res) => {
-  res.json({ success: true, message: 'Fees routes - Coming soon' });
-});
+/**
+ * Payment Routes
+ */
+// Record payment (admin only)
+router.post('/payment', adminOnly, feesController.recordPayment);
+
+// List all payments (staff can view)
+router.get('/payments', staffOnly, feesController.listPayments);
+
+// Get payments for specific voucher (staff can view)
+router.get('/voucher/:id/payments', staffOnly, feesController.getVoucherPayments);
+
+// Delete payment (admin only - for corrections)
+router.delete('/payment/:id', adminOnly, feesController.deletePayment);
+
+/**
+ * Defaulters Routes
+ */
+// Get defaulters list (staff can view)
+router.get('/defaulters', staffOnly, feesController.getDefaulters);
+
+/**
+ * Student Fee Routes
+ */
+// Get student fee history (staff can view)
+router.get('/student/:id', staffOnly, feesController.getStudentFeeHistory);
+
+// Get student current due (staff can view)
+router.get('/student/:id/due', staffOnly, feesController.getStudentDue);
+
+/**
+ * Statistics Routes
+ */
+// Get fee collection stats (staff can view)
+router.get('/stats', staffOnly, feesController.getStats);
 
 module.exports = router;
