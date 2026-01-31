@@ -15,6 +15,7 @@ class VouchersController {
     this.getById = this.getById.bind(this);
     this.updateItems = this.updateItems.bind(this);
     this.delete = this.delete.bind(this);
+    this.downloadPDF = this.downloadPDF.bind(this);
   }
 
   /**
@@ -622,6 +623,33 @@ class VouchersController {
       next(error);
     } finally {
       client.release();
+    }
+  }
+  
+  /**
+   * Download fee voucher as PDF
+   * GET /api/vouchers/:id/pdf
+   */
+  async downloadPDF(req, res, next) {
+    try {
+      const { id } = req.params;
+      const pdfService = require('../services/pdf.service');
+      
+      const { filepath, filename } = await pdfService.generateFeeVoucher(id);
+      
+      res.download(filepath, filename, (err) => {
+        // Clean up the file after sending
+        const fs = require('fs');
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        
+        if (err) {
+          next(err);
+        }
+      });
+    } catch (error) {
+      next(error);
     }
   }
 }

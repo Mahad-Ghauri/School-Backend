@@ -17,6 +17,7 @@ class FeesController {
     this.getStudentFeeHistory = this.getStudentFeeHistory.bind(this);
     this.getStudentDue = this.getStudentDue.bind(this);
     this.getStats = this.getStats.bind(this);
+    this.downloadReceipt = this.downloadReceipt.bind(this);
   }
 
   /**
@@ -573,6 +574,33 @@ class FeesController {
       next(error);
     } finally {
       client.release();
+    }
+  }
+  
+  /**
+   * Download payment receipt as PDF
+   * GET /api/fees/payment/:id/receipt
+   */
+  async downloadReceipt(req, res, next) {
+    try {
+      const { id } = req.params;
+      const pdfService = require('../services/pdf.service');
+      
+      const { filepath, filename } = await pdfService.generatePaymentReceipt(id, 'fee');
+      
+      res.download(filepath, filename, (err) => {
+        // Clean up the file after sending
+        const fs = require('fs');
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        
+        if (err) {
+          next(error);
+        }
+      });
+    } catch (error) {
+      next(error);
     }
   }
 }

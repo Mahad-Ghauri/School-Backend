@@ -22,6 +22,9 @@ router.get('/voucher/:id/payments', staffOnly, feesController.getVoucherPayments
 // Delete payment (admin only - for corrections)
 router.delete('/payment/:id', adminOnly, feesController.deletePayment);
 
+// Download payment receipt as PDF (staff can download)
+router.get('/payment/:id/receipt', staffOnly, feesController.downloadReceipt);
+
 /**
  * Defaulters Routes
  */

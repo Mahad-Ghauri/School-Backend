@@ -18,6 +18,7 @@ class SalariesController {
     this.getUnpaid = this.getUnpaid.bind(this);
     this.getStats = this.getStats.bind(this);
     this.deleteVoucher = this.deleteVoucher.bind(this);
+    this.downloadPDF = this.downloadPDF.bind(this);
   }
 
   /**
@@ -727,6 +728,33 @@ class SalariesController {
       next(error);
     } finally {
       client.release();
+    }
+  }
+  
+  /**
+   * Download salary slip as PDF
+   * GET /api/salaries/voucher/:id/pdf
+   */
+  async downloadPDF(req, res, next) {
+    try {
+      const { id } = req.params;
+      const pdfService = require('../services/pdf.service');
+      
+      const { filepath, filename } = await pdfService.generateSalarySlip(id);
+      
+      res.download(filepath, filename, (err) => {
+        // Clean up the file after sending
+        const fs = require('fs');
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        
+        if (err) {
+          next(err);
+        }
+      });
+    } catch (error) {
+      next(error);
     }
   }
 }
