@@ -16,7 +16,7 @@ school-backend/
 │   ├── server.js                  # Starts the server & connects to Neon
 │   │
 │   ├── config/
-│   │   ├── db.js                  # Neon PostgreSQL pool/connection
+│   │   ├── db.js                  # Supabase PostgreSQL pool/connection
 │   │   ├── r2.js                  # Cloudflare R2 client
 │   │   └── env.js                 # Load environment variables
 │   │
@@ -147,8 +147,8 @@ npm install --save-dev nodemon
 NODE_ENV=development
 PORT=5000
 
-# Neon PostgreSQL
-DATABASE_URL=postgresql://user:password@host/dbname?sslmode=require
+# Supabase PostgreSQL
+DATABASE_URL=postgresql://postgres:[YOUR-PASSWORD]@db.shblslbinibfgfdaeedm.supabase.co:5432/postgres
 
 # JWT
 JWT_SECRET=your-super-secret-key-change-this-in-production
@@ -232,7 +232,7 @@ const pool = new Pool({
 });
 
 pool.on('connect', () => {
-  console.log('✅ Connected to Neon PostgreSQL');
+  console.log('✅ Connected to Supabase PostgreSQL');
 });
 
 pool.on('error', (err) => {
