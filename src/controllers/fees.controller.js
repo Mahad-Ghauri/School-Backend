@@ -7,6 +7,18 @@ const Joi = require('joi');
  * Handles fee payments, defaulters, and fee-related operations
  */
 class FeesController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.recordPayment = this.recordPayment.bind(this);
+    this.listPayments = this.listPayments.bind(this);
+    this.getVoucherPayments = this.getVoucherPayments.bind(this);
+    this.deletePayment = this.deletePayment.bind(this);
+    this.getDefaulters = this.getDefaulters.bind(this);
+    this.getStudentFeeHistory = this.getStudentFeeHistory.bind(this);
+    this.getStudentDue = this.getStudentDue.bind(this);
+    this.getStats = this.getStats.bind(this);
+  }
+
   /**
    * Record a fee payment
    * POST /api/fees/payment

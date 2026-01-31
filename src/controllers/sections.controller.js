@@ -7,6 +7,16 @@ const Joi = require('joi');
  * Manages sections within classes
  */
 class SectionsController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.create = this.create.bind(this);
+    this.list = this.list.bind(this);
+    this.getById = this.getById.bind(this);
+    this.update = this.update.bind(this);
+    this.delete = this.delete.bind(this);
+    this.getStudents = this.getStudents.bind(this);
+  }
+
   /**
    * Create a new section
    * POST /api/sections

@@ -7,6 +7,16 @@ const Joi = require('joi');
  * Handles fee voucher generation and management
  */
 class VouchersController {
+  constructor() {
+    // Bind all methods to preserve 'this' context
+    this.generate = this.generate.bind(this);
+    this.generateBulk = this.generateBulk.bind(this);
+    this.list = this.list.bind(this);
+    this.getById = this.getById.bind(this);
+    this.updateItems = this.updateItems.bind(this);
+    this.delete = this.delete.bind(this);
+  }
+
   /**
    * Generate fee voucher for a student
    * POST /api/vouchers/generate
@@ -72,16 +82,19 @@ class VouchersController {
 
       // Get current fee structure for the class
       const feeStructure = await client.query(
-        `SELECT fee_structure 
-         FROM classes 
-         WHERE id = $1`,
+        `SELECT admission_fee, monthly_fee, paper_fund
+         FROM class_fee_structure 
+         WHERE class_id = $1
+         ORDER BY effective_from DESC
+         LIMIT 1`,
         [enrollment.class_id]
       );
 
-      if (!feeStructure.rows[0].fee_structure || 
-          Object.keys(feeStructure.rows[0].fee_structure).length === 0) {
+      if (feeStructure.rows.length === 0) {
         return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
       }
+
+      const fees = feeStructure.rows[0];
 
       // Create voucher
       const voucherResult = await client.query(
@@ -94,13 +107,18 @@ class VouchersController {
       const voucher = voucherResult.rows[0];
 
       // Insert fee structure items
-      const feeItems = feeStructure.rows[0].fee_structure;
-      for (const [itemType, amount] of Object.entries(feeItems)) {
-        if (amount > 0) {
+      const feeItems = [
+        { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
+        { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
+        { item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 }
+      ];
+      
+      for (const item of feeItems) {
+        if (item.amount > 0) {
           await client.query(
             `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
              VALUES ($1, $2, $3)`,
-            [voucher.id, itemType, amount]
+            [voucher.id, item.item_type, item.amount]
           );
         }
       }
@@ -153,18 +171,19 @@ class VouchersController {
 
       // Get fee structure for the class
       const feeStructure = await client.query(
-        `SELECT fee_structure FROM classes WHERE id = $1`,
+        `SELECT admission_fee, monthly_fee, paper_fund
+         FROM class_fee_structure
+         WHERE class_id = $1
+         ORDER BY effective_from DESC
+         LIMIT 1`,
         [class_id]
       );
 
       if (feeStructure.rows.length === 0) {
-        return ApiResponse.error(res, 'Class not found', 404);
-      }
-
-      if (!feeStructure.rows[0].fee_structure || 
-          Object.keys(feeStructure.rows[0].fee_structure).length === 0) {
         return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
       }
+
+      const fees = feeStructure.rows[0];
 
       // Get all enrolled students in class/section
       let query = `
@@ -194,7 +213,11 @@ class VouchersController {
         failed: []
       };
 
-      const feeItems = feeStructure.rows[0].fee_structure;
+      const feeItems = [
+        { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
+        { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
+        { item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 }
+      ];
 
       // Generate voucher for each student
       for (const student of students.rows) {
@@ -227,12 +250,12 @@ class VouchersController {
           const voucher = voucherResult.rows[0];
 
           // Insert fee items
-          for (const [itemType, amount] of Object.entries(feeItems)) {
-            if (amount > 0) {
+          for (const item of feeItems) {
+            if (item.amount > 0) {
               await client.query(
                 `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
                  VALUES ($1, $2, $3)`,
-                [voucher.id, itemType, amount]
+                [voucher.id, item.item_type, item.amount]
               );
             }
           }
