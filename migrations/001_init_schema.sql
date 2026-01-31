@@ -97,10 +97,21 @@ CREATE TABLE student_class_history (
 CREATE TABLE student_documents (
   id BIGSERIAL PRIMARY KEY,
   student_id BIGINT REFERENCES students(id) ON DELETE CASCADE,
-  file_type TEXT CHECK (file_type IN ('IMAGE','PDF')) NOT NULL,
-  file_path TEXT NOT NULL,
+  document_type VARCHAR(50),
+  file_name VARCHAR(255),
+  file_url TEXT,
+  file_size BIGINT,
+  mime_type VARCHAR(100),
+  description TEXT,
   uploaded_at TIMESTAMP DEFAULT now()
 );
+
+-- Create indexes for better performance
+CREATE INDEX idx_student_documents_student_id ON student_documents(student_id);
+CREATE INDEX idx_student_documents_type ON student_documents(document_type);
+
+-- Add table comment
+COMMENT ON TABLE student_documents IS 'Stores student documents uploaded to Cloudflare R2 storage';
 
 -- =========================================
 -- FEE VOUCHERS
