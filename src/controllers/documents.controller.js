@@ -8,6 +8,18 @@ const Joi = require('joi');
  * Handles student document uploads and management
  */
 class DocumentsController {
+  constructor() {
+    this.uploadDocument = this.uploadDocument.bind(this);
+    this.uploadMultipleDocuments = this.uploadMultipleDocuments.bind(this);
+    this.getStudentDocuments = this.getStudentDocuments.bind(this);
+    this.getDocumentById = this.getDocumentById.bind(this);
+    this.downloadDocument = this.downloadDocument.bind(this);
+    this.getSignedUrl = this.getSignedUrl.bind(this);
+    this.deleteDocument = this.deleteDocument.bind(this);
+    this.updateDocument = this.updateDocument.bind(this);
+    this.getStats = this.getStats.bind(this);
+  }
+
   /**
    * Upload document for student
    * POST /api/students/:id/documents
