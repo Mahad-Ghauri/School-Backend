@@ -27,12 +27,15 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { student_id, month, custom_items = [] } = req.body;
+      const { student_id, month, fee_types, custom_items = [] } = req.body;
 
       // Validate input
       const schema = Joi.object({
         student_id: Joi.number().integer().required(),
         month: Joi.date().required(),
+        fee_types: Joi.array().items(
+          Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional(),
         custom_items: Joi.array().items(
           Joi.object({
             item_type: Joi.string().required(),
@@ -107,12 +110,30 @@ class VouchersController {
 
       const voucher = voucherResult.rows[0];
 
-      // Insert fee structure items
-      const feeItems = [
+      // Build fee items based on fee_types parameter
+      let feeItems = [
         { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
         { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
         { item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 }
       ];
+
+      // Filter by fee_types if provided
+      if (fee_types && fee_types.length > 0) {
+        feeItems = feeItems.filter(item => fee_types.includes(item.item_type));
+      } else {
+        // Smart ADMISSION fee logic: skip if student already has ADMISSION fee in any voucher
+        const existingAdmission = await client.query(
+          `SELECT 1 FROM fee_voucher_items fvi
+           JOIN fee_vouchers fv ON fv.id = fvi.voucher_id
+           JOIN student_class_history sch ON fv.student_class_history_id = sch.id
+           WHERE sch.student_id = $1 AND fvi.item_type = 'ADMISSION'
+           LIMIT 1`,
+          [student_id]
+        );
+        if (existingAdmission.rows.length > 0) {
+          feeItems = feeItems.filter(item => item.item_type !== 'ADMISSION');
+        }
+      }
       
       for (const item of feeItems) {
         if (item.amount > 0) {
@@ -156,13 +177,16 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { class_id, section_id, month } = req.body;
+      const { class_id, section_id, month, fee_types } = req.body;
 
       // Validate input
       const schema = Joi.object({
         class_id: Joi.number().integer().required(),
         section_id: Joi.number().integer().optional(),
-        month: Joi.date().required()
+        month: Joi.date().required(),
+        fee_types: Joi.array().items(
+          Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional()
       });
 
       const { error } = schema.validate(req.body);
@@ -214,7 +238,7 @@ class VouchersController {
         failed: []
       };
 
-      const feeItems = [
+      const baseFeeItems = [
         { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
         { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
         { item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 }
@@ -238,6 +262,27 @@ class VouchersController {
               reason: 'Voucher already exists for this month'
             });
             continue;
+          }
+
+          // Build fee items for this student
+          let feeItems = [...baseFeeItems];
+
+          // Filter by fee_types if provided
+          if (fee_types && fee_types.length > 0) {
+            feeItems = feeItems.filter(item => fee_types.includes(item.item_type));
+          } else {
+            // Smart ADMISSION fee logic: skip if student already has ADMISSION fee
+            const existingAdmission = await client.query(
+              `SELECT 1 FROM fee_voucher_items fvi
+               JOIN fee_vouchers fv ON fv.id = fvi.voucher_id
+               JOIN student_class_history sch ON fv.student_class_history_id = sch.id
+               WHERE sch.student_id = $1 AND fvi.item_type = 'ADMISSION'
+               LIMIT 1`,
+              [student.student_id]
+            );
+            if (existingAdmission.rows.length > 0) {
+              feeItems = feeItems.filter(item => item.item_type !== 'ADMISSION');
+            }
           }
 
           // Create voucher
@@ -306,12 +351,24 @@ class VouchersController {
         class_id,
         section_id,
         month,
+        year,
         status,
         from_date,
         to_date,
         page = 1,
         limit = 50
       } = req.query;
+
+      // Handle month/year parameters - convert to date format
+      let monthDate = null;
+      if (month && year) {
+        // month=2, year=2026 -> '2026-02-01'
+        const paddedMonth = month.toString().padStart(2, '0');
+        monthDate = `${year}-${paddedMonth}-01`;
+      } else if (month && month.length >= 7) {
+        // month='2026-02' or month='2026-02-01' format
+        monthDate = month.length === 7 ? `${month}-01` : month;
+      }
 
       let query = `
         SELECT v.id as voucher_id,
@@ -363,9 +420,9 @@ class VouchersController {
         paramCount++;
       }
 
-      if (month) {
+      if (monthDate) {
         query += ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $${paramCount}::date)`;
-        params.push(month);
+        params.push(monthDate);
         paramCount++;
       }
 
@@ -549,7 +606,13 @@ class VouchersController {
         );
       }
 
-      // Add new items
+      // Delete existing items first
+      await client.query(
+        `DELETE FROM fee_voucher_items WHERE voucher_id = $1`,
+        [id]
+      );
+
+      // Insert new items
       for (const item of items) {
         await client.query(
           `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
