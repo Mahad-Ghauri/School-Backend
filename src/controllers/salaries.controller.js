@@ -400,9 +400,12 @@ class SalariesController {
         paramCount++;
       }
 
-      if (month) {
+      // Normalize month format: '2026-01' -> '2026-01-01'
+      const monthDate = month ? (month.length === 7 ? `${month}-01` : month) : null;
+
+      if (monthDate) {
         query += ` AND DATE_TRUNC('month', sv.month) = DATE_TRUNC('month', $${paramCount}::date)`;
-        params.push(month);
+        params.push(monthDate);
         paramCount++;
       }
 
@@ -424,7 +427,7 @@ class SalariesController {
         FROM salary_vouchers sv
         WHERE 1=1
         ${faculty_id ? ` AND sv.faculty_id = ${faculty_id}` : ''}
-        ${month ? ` AND DATE_TRUNC('month', sv.month) = DATE_TRUNC('month', '${month}'::date)` : ''}
+        ${monthDate ? ` AND DATE_TRUNC('month', sv.month) = DATE_TRUNC('month', '${monthDate}'::date)` : ''}
         ${from_date ? ` AND sv.month >= '${from_date}'` : ''}
         ${to_date ? ` AND sv.month <= '${to_date}'` : ''}
       `;
