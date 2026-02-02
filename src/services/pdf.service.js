@@ -326,12 +326,12 @@ class PDFService {
          LEFT JOIN LATERAL (
            SELECT base_salary 
            FROM salary_structure 
-           WHERE faculty_id = f.id 
-             AND effective_from <= v.month
+           WHERE faculty_id::int = f.id::int 
+             AND DATE_TRUNC('month', effective_from) <= DATE_TRUNC('month', v.month::date)
            ORDER BY effective_from DESC 
            LIMIT 1
          ) ss ON true
-         WHERE v.id = $1`,
+         WHERE v.id = $1::int`,
         [voucherId]
       );
 

@@ -81,10 +81,12 @@ class SalariesController {
       }
 
       // Get current salary structure
+      // Use DATE_TRUNC for month-level comparison to avoid timezone issues
+      // effective_from should be <= the first day of the voucher month
       const salaryStructure = await client.query(
         `SELECT * FROM salary_structure 
-         WHERE faculty_id = $1 
-         AND effective_from <= $2::date
+         WHERE faculty_id = $1::int 
+         AND DATE_TRUNC('month', effective_from) <= DATE_TRUNC('month', $2::date)
          ORDER BY effective_from DESC 
          LIMIT 1`,
         [faculty_id, month]
@@ -195,8 +197,8 @@ class SalariesController {
           // Get salary structure
           const salaryStructure = await client.query(
             `SELECT * FROM salary_structure 
-             WHERE faculty_id = $1 
-             AND effective_from <= $2::date
+             WHERE faculty_id = $1::int 
+             AND DATE_TRUNC('month', effective_from) <= DATE_TRUNC('month', $2::date)
              ORDER BY effective_from DESC 
              LIMIT 1`,
             [faculty.id, month]
@@ -268,7 +270,12 @@ class SalariesController {
               f.name as faculty_name,
               f.role,
               f.cnic,
-              ss.base_salary,
+              (SELECT ss2.base_salary 
+               FROM salary_structure ss2 
+               WHERE ss2.faculty_id::int = sv.faculty_id::int 
+               AND DATE_TRUNC('month', ss2.effective_from) <= DATE_TRUNC('month', sv.month::date)
+               ORDER BY ss2.effective_from DESC 
+               LIMIT 1) as base_salary,
               (SELECT json_agg(json_build_object(
                 'id', sa.id,
                 'type', sa.type,
@@ -286,11 +293,7 @@ class SalariesController {
               WHERE sp.voucher_id = sv.id) as payments
        FROM salary_vouchers sv
        JOIN faculty f ON sv.faculty_id = f.id
-       LEFT JOIN salary_structure ss ON ss.faculty_id = sv.faculty_id 
-         AND ss.effective_from <= sv.month
-       WHERE sv.id = $1
-       ORDER BY ss.effective_from DESC
-       LIMIT 1`,
+       WHERE sv.id = $1::int`,
       [voucherId]
     );
 
