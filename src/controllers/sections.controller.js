@@ -154,10 +154,19 @@ class SectionsController {
       }
 
       // Count total records
-      const countResult = await client.query(
-        query.replace('SELECT s.*', 'SELECT COUNT(*)'),
-        params
-      );
+      const countQuery = `
+        SELECT COUNT(*)
+        FROM sections s
+        JOIN classes c ON s.class_id = c.id
+        WHERE 1=1
+      `;
+      
+      let countQueryWithFilters = countQuery;
+      if (class_id) {
+        countQueryWithFilters += ` AND s.class_id = $1`;
+      }
+      
+      const countResult = await client.query(countQueryWithFilters, class_id ? [class_id] : []);
       const total = parseInt(countResult.rows[0].count);
 
       // Add pagination

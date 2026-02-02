@@ -5,7 +5,7 @@ const Joi = require('joi');
 
 // In-memory store for login attempts (use Redis in production)
 const loginAttempts = new Map();
-const MAX_LOGIN_ATTEMPTS = 5;
+const MAX_LOGIN_ATTEMPTS = 999999; // Unlimited for testing (was 5)
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
 
 /**

@@ -16,6 +16,13 @@ class StudentsController {
     this.update = this.update.bind(this);
     this.enroll = this.enroll.bind(this);
     this.withdraw = this.withdraw.bind(this);
+    this.deactivate = this.deactivate.bind(this);
+    this.activate = this.activate.bind(this);
+    this.expel = this.expel.bind(this);
+    this.clearExpulsion = this.clearExpulsion.bind(this);
+    this.addGuardian = this.addGuardian.bind(this);
+    this.removeGuardian = this.removeGuardian.bind(this);
+    this.transfer = this.transfer.bind(this);
   }
 
   /**

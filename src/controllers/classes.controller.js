@@ -193,10 +193,12 @@ class ClassesController {
       }
 
       // Count total records
-      const countResult = await client.query(
-        query.replace('SELECT c.*', 'SELECT COUNT(*)'),
-        params
-      );
+      const countQuery = query
+        .replace(
+          'SELECT c.*,\n               (SELECT COUNT(*) FROM sections WHERE class_id = c.id) as section_count,\n               (SELECT COUNT(DISTINCT student_id) \n                FROM student_class_history \n                WHERE class_id = c.id AND end_date IS NULL) as student_count',
+          'SELECT COUNT(*)'
+        );
+      const countResult = await client.query(countQuery, params);
       const total = parseInt(countResult.rows[0].count);
 
       // Add pagination
