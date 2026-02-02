@@ -3,6 +3,11 @@ const CryptoUtil = require('../utils/crypto');
 const ApiResponse = require('../utils/response');
 const Joi = require('joi');
 
+// In-memory store for login attempts (use Redis in production)
+const loginAttempts = new Map();
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
+
 /**
  * Authentication Controller
  * Handles user registration, login, and profile management
@@ -20,7 +25,14 @@ class AuthController {
       // Validate input
       const schema = Joi.object({
         email: Joi.string().email().required(),
-        password: Joi.string().min(6).required(),
+        password: Joi.string()
+          .min(8)
+          .pattern(/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/)
+          .required()
+          .messages({
+            'string.min': 'Password must be at least 8 characters long',
+            'string.pattern.base': 'Password must contain uppercase, lowercase, and number'
+          }),
         role: Joi.string().valid('ADMIN', 'ACCOUNTANT').required()
       });
 
@@ -69,6 +81,23 @@ class AuthController {
     try {
       const { email, password } = req.body;
 
+      // Check brute force attempts
+      const attemptKey = `${email}:${req.ip}`;
+      const attempts = loginAttempts.get(attemptKey);
+      
+      if (attempts && attempts.count >= MAX_LOGIN_ATTEMPTS) {
+        const elapsed = Date.now() - attempts.timestamp;
+        if (elapsed < LOCKOUT_DURATION) {
+          const remainingMinutes = Math.ceil((LOCKOUT_DURATION - elapsed) / 60000);
+          return ApiResponse.error(res, 
+            `Account temporarily locked due to multiple failed login attempts. Try again in ${remainingMinutes} minutes.`, 
+            429
+          );
+        }
+        // Lockout expired, reset
+        loginAttempts.delete(attemptKey);
+      }
+
       // Validate input
       const schema = Joi.object({
         email: Joi.string().email().required(),
@@ -87,6 +116,13 @@ class AuthController {
       );
 
       if (result.rows.length === 0) {
+        // Track failed attempt even for non-existent users (prevent user enumeration timing)
+        const attemptKey = `${email}:${req.ip}`;
+        const currentAttempts = loginAttempts.get(attemptKey) || { count: 0, timestamp: Date.now() };
+        currentAttempts.count++;
+        currentAttempts.timestamp = Date.now();
+        loginAttempts.set(attemptKey, currentAttempts);
+        
         return ApiResponse.error(res, 'Invalid email or password', 401);
       }
 
@@ -96,8 +132,18 @@ class AuthController {
       const isValidPassword = await CryptoUtil.comparePassword(password, user.password_hash);
 
       if (!isValidPassword) {
+        // Track failed attempt
+        const attemptKey = `${email}:${req.ip}`;
+        const currentAttempts = loginAttempts.get(attemptKey) || { count: 0, timestamp: Date.now() };
+        currentAttempts.count++;
+        currentAttempts.timestamp = Date.now();
+        loginAttempts.set(attemptKey, currentAttempts);
+        
         return ApiResponse.error(res, 'Invalid email or password', 401);
       }
+
+      // Reset attempts on successful login
+      loginAttempts.delete(`${email}:${req.ip}`);
 
       // Generate JWT token
       const token = CryptoUtil.generateToken({
