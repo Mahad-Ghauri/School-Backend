@@ -19,6 +19,7 @@ const expensesRoutes = require('./routes/expenses.routes');
 const reportsRoutes = require('./routes/reports.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
 const documentsRoutes = require('./routes/documents.routes');
+const discountsRoutes = require('./routes/discounts.routes');
 
 const app = express();
 
@@ -69,6 +70,7 @@ app.use('/api/expenses', expensesRoutes);
 app.use('/api/reports', reportsRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api', documentsRoutes);
+app.use('/api/discounts', discountsRoutes);
 
 // 404 handler
 app.use(notFoundHandler);

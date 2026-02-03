@@ -27,12 +27,13 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { student_id, month, fee_types, custom_items = [] } = req.body;
+      const { student_id, month, fee_types, custom_items = [], due_date } = req.body;
 
       // Validate input
       const schema = Joi.object({
         student_id: Joi.number().integer().required(),
         month: Joi.date().required(),
+        due_date: Joi.date().optional(),
         fee_types: Joi.array().items(
           Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
         ).optional(),
@@ -100,41 +101,57 @@ class VouchersController {
 
       const fees = feeStructure.rows[0];
 
-      // Create voucher
+      // Determine if this is the first voucher for this class enrollment
+      // Check BEFORE creating the voucher
+      const existingVouchersCount = await client.query(
+        `SELECT COUNT(*) as count FROM fee_vouchers fv
+         WHERE fv.student_class_history_id = $1`,
+        [enrollment.id]
+      );
+      const isFirstEnrollment = parseInt(existingVouchersCount.rows[0].count) === 0;
+
+      // Calculate due date (default: 10th of the voucher month)
+      const calculatedDueDate = due_date || (() => {
+        const voucherMonth = new Date(month);
+        return new Date(voucherMonth.getFullYear(), voucherMonth.getMonth(), 10);
+      })();
+
+      // Create voucher with due date
       const voucherResult = await client.query(
-        `INSERT INTO fee_vouchers (student_class_history_id, month)
-         VALUES ($1, $2)
+        `INSERT INTO fee_vouchers (student_class_history_id, month, due_date)
+         VALUES ($1, $2, $3)
          RETURNING *`,
-        [enrollment.id, month]
+        [enrollment.id, month, calculatedDueDate]
       );
 
       const voucher = voucherResult.rows[0];
 
-      // Build fee items based on fee_types parameter
-      let feeItems = [
-        { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
-        { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
-        { item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 }
-      ];
+      // Build fee items based on fee_types parameter or smart logic
+      let feeItems = [];
 
-      // Filter by fee_types if provided
       if (fee_types && fee_types.length > 0) {
-        feeItems = feeItems.filter(item => fee_types.includes(item.item_type));
-      } else {
-        // Smart ADMISSION fee logic: skip if student already has ADMISSION fee in any voucher
-        const existingAdmission = await client.query(
-          `SELECT 1 FROM fee_voucher_items fvi
-           JOIN fee_vouchers fv ON fv.id = fvi.voucher_id
-           JOIN student_class_history sch ON fv.student_class_history_id = sch.id
-           WHERE sch.student_id = $1 AND fvi.item_type = 'ADMISSION'
-           LIMIT 1`,
-          [student_id]
-        );
-        if (existingAdmission.rows.length > 0) {
-          feeItems = feeItems.filter(item => item.item_type !== 'ADMISSION');
+        // Manual fee_types specified - use them
+        if (fee_types.includes('ADMISSION')) {
+          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
         }
+        if (fee_types.includes('MONTHLY')) {
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+        }
+        if (fee_types.includes('PAPER_FUND')) {
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+        }
+      } else {
+        // Smart logic: One-time fees only on first voucher for this class
+        if (isFirstEnrollment) {
+          // First voucher for this class - include one-time fees
+          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+        }
+        // Always include recurring fees
+        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+        feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
       }
-      
+
+      // Insert fee items
       for (const item of feeItems) {
         if (item.amount > 0) {
           await client.query(
@@ -145,7 +162,36 @@ class VouchersController {
         }
       }
 
-      // Insert custom items (arrears, transport, discounts, etc.)
+      // Apply persistent student discount (if exists)
+      const discountResult = await client.query(
+        `SELECT discount_type, discount_value FROM student_discounts
+         WHERE student_id = $1 AND class_id = $2`,
+        [student_id, enrollment.class_id]
+      );
+
+      if (discountResult.rows.length > 0) {
+        const discount = discountResult.rows[0];
+        let discountAmount = 0;
+
+        if (discount.discount_type === 'PERCENTAGE') {
+          // Calculate percentage discount on total fees
+          const totalFees = feeItems.reduce((sum, item) => sum + item.amount, 0);
+          discountAmount = (totalFees * parseFloat(discount.discount_value)) / 100;
+        } else {
+          // Flat discount
+          discountAmount = parseFloat(discount.discount_value);
+        }
+
+        if (discountAmount > 0) {
+          await client.query(
+            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+             VALUES ($1, 'DISCOUNT', $2)`,
+            [voucher.id, -discountAmount] // Negative amount for discount
+          );
+        }
+      }
+
+      // Insert custom items (arrears, transport, late fees, etc.)
       for (const item of custom_items) {
         await client.query(
           `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
@@ -177,13 +223,14 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { class_id, section_id, month, fee_types } = req.body;
+      const { class_id, section_id, month, fee_types, due_date } = req.body;
 
       // Validate input
       const schema = Joi.object({
         class_id: Joi.number().integer().required(),
         section_id: Joi.number().integer().optional(),
         month: Joi.date().required(),
+        due_date: Joi.date().optional(),
         fee_types: Joi.array().items(
           Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
         ).optional()
@@ -238,6 +285,12 @@ class VouchersController {
         failed: []
       };
 
+      // Calculate due date (default: 10th of the voucher month)
+      const calculatedDueDate = due_date || (() => {
+        const voucherMonth = new Date(month);
+        return new Date(voucherMonth.getFullYear(), voucherMonth.getMonth(), 10);
+      })();
+
       const baseFeeItems = [
         { item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 },
         { item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 },
@@ -264,33 +317,46 @@ class VouchersController {
             continue;
           }
 
-          // Build fee items for this student
-          let feeItems = [...baseFeeItems];
+          // Determine if this is the first voucher for this class enrollment
+          const isFirstVoucherForClass = await client.query(
+            `SELECT 1 FROM fee_vouchers fv
+             WHERE fv.student_class_history_id = $1
+             LIMIT 1`,
+            [student.enrollment_id]
+          );
+          const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
 
-          // Filter by fee_types if provided
+          // Build fee items for this student
+          let feeItems = [];
+
           if (fee_types && fee_types.length > 0) {
-            feeItems = feeItems.filter(item => fee_types.includes(item.item_type));
-          } else {
-            // Smart ADMISSION fee logic: skip if student already has ADMISSION fee
-            const existingAdmission = await client.query(
-              `SELECT 1 FROM fee_voucher_items fvi
-               JOIN fee_vouchers fv ON fv.id = fvi.voucher_id
-               JOIN student_class_history sch ON fv.student_class_history_id = sch.id
-               WHERE sch.student_id = $1 AND fvi.item_type = 'ADMISSION'
-               LIMIT 1`,
-              [student.student_id]
-            );
-            if (existingAdmission.rows.length > 0) {
-              feeItems = feeItems.filter(item => item.item_type !== 'ADMISSION');
+            // Manual fee_types specified - use them
+            if (fee_types.includes('ADMISSION')) {
+              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
             }
+            if (fee_types.includes('MONTHLY')) {
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+            }
+            if (fee_types.includes('PAPER_FUND')) {
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+            }
+          } else {
+            // Smart logic: One-time fees only on first voucher for this class
+            if (isFirstEnrollment) {
+              // First voucher for this class - include one-time fees
+              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+            }
+            // Always include recurring fees
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
           }
 
-          // Create voucher
+          // Create voucher with due date
           const voucherResult = await client.query(
-            `INSERT INTO fee_vouchers (student_class_history_id, month)
-             VALUES ($1, $2)
+            `INSERT INTO fee_vouchers (student_class_history_id, month, due_date)
+             VALUES ($1, $2, $3)
              RETURNING *`,
-            [student.enrollment_id, month]
+            [student.enrollment_id, month, calculatedDueDate]
           );
 
           const voucher = voucherResult.rows[0];
@@ -302,6 +368,35 @@ class VouchersController {
                 `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
                  VALUES ($1, $2, $3)`,
                 [voucher.id, item.item_type, item.amount]
+              );
+            }
+          }
+
+          // Apply persistent student discount (if exists)
+          const discountResult = await client.query(
+            `SELECT discount_type, discount_value FROM student_discounts
+             WHERE student_id = $1 AND class_id = $2`,
+            [student.student_id, class_id]
+          );
+
+          if (discountResult.rows.length > 0) {
+            const discount = discountResult.rows[0];
+            let discountAmount = 0;
+
+            if (discount.discount_type === 'PERCENTAGE') {
+              // Calculate percentage discount on total fees
+              const totalFees = feeItems.reduce((sum, item) => sum + item.amount, 0);
+              discountAmount = (totalFees * parseFloat(discount.discount_value)) / 100;
+            } else {
+              // Flat discount
+              discountAmount = parseFloat(discount.discount_value);
+            }
+
+            if (discountAmount > 0) {
+              await client.query(
+                `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+                 VALUES ($1, 'DISCOUNT', $2)`,
+                [voucher.id, -discountAmount] // Negative amount for discount
               );
             }
           }
@@ -382,11 +477,11 @@ class VouchersController {
                sec.id as section_id,
                sec.name as section_name,
                SUM(vi.amount) as total_fee,
-               COALESCE(SUM(p.amount), 0) as paid_amount,
-               SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount,
+               COALESCE(MAX(p.paid_total), 0) as paid_amount,
+               SUM(vi.amount) - COALESCE(MAX(p.paid_total), 0) as due_amount,
                CASE 
-                 WHEN SUM(vi.amount) <= COALESCE(SUM(p.amount), 0) THEN 'PAID'
-                 WHEN COALESCE(SUM(p.amount), 0) > 0 THEN 'PARTIAL'
+                 WHEN SUM(vi.amount) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
+                 WHEN COALESCE(MAX(p.paid_total), 0) > 0 THEN 'PARTIAL'
                  ELSE 'UNPAID'
                END as status
         FROM fee_vouchers v
@@ -395,7 +490,11 @@ class VouchersController {
         JOIN classes c ON sch.class_id = c.id
         JOIN sections sec ON sch.section_id = sec.id
         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-        LEFT JOIN fee_payments p ON v.id = p.voucher_id
+        LEFT JOIN (
+          SELECT voucher_id, SUM(amount) as paid_total 
+          FROM fee_payments 
+          GROUP BY voucher_id
+        ) p ON v.id = p.voucher_id
         WHERE 1=1
       `;
 
@@ -443,9 +542,9 @@ class VouchersController {
       // Apply status filter after grouping
       if (status) {
         const statusMap = {
-          'PAID': 'SUM(vi.amount) <= COALESCE(SUM(p.amount), 0)',
-          'UNPAID': 'COALESCE(SUM(p.amount), 0) = 0',
-          'PARTIAL': 'COALESCE(SUM(p.amount), 0) > 0 AND SUM(vi.amount) > COALESCE(SUM(p.amount), 0)'
+          'PAID': 'SUM(vi.amount) <= COALESCE(MAX(p.paid_total), 0)',
+          'UNPAID': 'COALESCE(MAX(p.paid_total), 0) = 0',
+          'PARTIAL': 'COALESCE(MAX(p.paid_total), 0) > 0 AND SUM(vi.amount) > COALESCE(MAX(p.paid_total), 0)'
         };
         if (statusMap[status.toUpperCase()]) {
           query += ` HAVING ${statusMap[status.toUpperCase()]}`;
@@ -509,8 +608,15 @@ class VouchersController {
    */
   async getVoucherById(client, voucherId) {
     const result = await client.query(
-      `SELECT v.id as voucher_id,
+      `WITH PaymentTotal AS (
+         SELECT voucher_id, COALESCE(SUM(amount), 0) as paid_amount
+         FROM fee_payments
+         WHERE voucher_id = $1
+         GROUP BY voucher_id
+       )
+       SELECT v.id as voucher_id,
               v.month,
+              v.due_date,
               v.created_at,
               s.id as student_id,
               s.name as student_name,
@@ -533,11 +639,11 @@ class VouchersController {
               FROM fee_payments p
               WHERE p.voucher_id = v.id) as payments,
               SUM(vi.amount) as total_fee,
-              COALESCE(SUM(p.amount), 0) as paid_amount,
-              SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount,
+              COALESCE(pt.paid_amount, 0) as paid_amount,
+              SUM(vi.amount) - COALESCE(pt.paid_amount, 0) as due_amount,
               CASE 
-                WHEN SUM(vi.amount) <= COALESCE(SUM(p.amount), 0) THEN 'PAID'
-                WHEN COALESCE(SUM(p.amount), 0) > 0 THEN 'PARTIAL'
+                WHEN SUM(vi.amount) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
+                WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
                 ELSE 'UNPAID'
               END as status
        FROM fee_vouchers v
@@ -546,10 +652,10 @@ class VouchersController {
        JOIN classes c ON sch.class_id = c.id
        JOIN sections sec ON sch.section_id = sec.id
        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-       LEFT JOIN fee_payments p ON v.id = p.voucher_id
+       LEFT JOIN PaymentTotal pt ON v.id = pt.voucher_id
        WHERE v.id = $1
-       GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.roll_no, s.phone, 
-                c.id, c.name, sec.id, sec.name`,
+       GROUP BY v.id, v.month, v.due_date, v.created_at, s.id, s.name, s.roll_no, s.phone, 
+                c.id, c.name, sec.id, sec.name, pt.paid_amount`,
       [voucherId]
     );
 
@@ -688,7 +794,7 @@ class VouchersController {
       client.release();
     }
   }
-  
+
   /**
    * Download fee voucher as PDF
    * GET /api/vouchers/:id/pdf
@@ -697,16 +803,16 @@ class VouchersController {
     try {
       const { id } = req.params;
       const pdfService = require('../services/pdf.service');
-      
+
       const { filepath, filename } = await pdfService.generateFeeVoucher(id);
-      
+
       res.download(filepath, filename, (err) => {
         // Clean up the file after sending
         const fs = require('fs');
         if (fs.existsSync(filepath)) {
           fs.unlinkSync(filepath);
         }
-        
+
         if (err) {
           next(err);
         }

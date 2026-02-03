@@ -45,14 +45,25 @@ class FeesController {
 
       // Check if voucher exists
       const voucherCheck = await client.query(
-        `SELECT v.id, 
-                SUM(vi.amount) as total_fee,
-                COALESCE(SUM(p.amount), 0) as paid_amount
+        `WITH VoucherTotals AS (
+           SELECT voucher_id, SUM(amount) as total_fee
+           FROM fee_voucher_items
+           WHERE voucher_id = $1
+           GROUP BY voucher_id
+         ),
+         PaymentTotals AS (
+           SELECT voucher_id, SUM(amount) as paid_amount
+           FROM fee_payments
+           WHERE voucher_id = $1
+           GROUP BY voucher_id
+         )
+         SELECT v.id, 
+                COALESCE(vt.total_fee, 0) as total_fee,
+                COALESCE(pt.paid_amount, 0) as paid_amount
          FROM fee_vouchers v
-         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-         LEFT JOIN fee_payments p ON v.id = p.voucher_id
-         WHERE v.id = $1
-         GROUP BY v.id`,
+         LEFT JOIN VoucherTotals vt ON v.id = vt.voucher_id
+         LEFT JOIN PaymentTotals pt ON v.id = pt.voucher_id
+         WHERE v.id = $1`,
         [voucher_id]
       );
 
@@ -102,18 +113,30 @@ class FeesController {
    */
   async getVoucherStatus(client, voucherId) {
     const result = await client.query(
-      `SELECT v.id,
+      `WITH VoucherTotals AS (
+         SELECT voucher_id, SUM(amount) as total_fee
+         FROM fee_voucher_items
+         WHERE voucher_id = $1
+         GROUP BY voucher_id
+       ),
+       PaymentTotals AS (
+         SELECT voucher_id, SUM(amount) as paid_amount
+         FROM fee_payments
+         WHERE voucher_id = $1
+         GROUP BY voucher_id
+       )
+       SELECT v.id,
               v.month,
               s.id as student_id,
               s.name as student_name,
               c.name as class_name,
               sec.name as section_name,
-              SUM(vi.amount) as total_fee,
-              COALESCE(SUM(p.amount), 0) as paid_amount,
-              SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount,
+              COALESCE(vt.total_fee, 0) as total_fee,
+              COALESCE(pt.paid_amount, 0) as paid_amount,
+              COALESCE(vt.total_fee, 0) - COALESCE(pt.paid_amount, 0) as due_amount,
               CASE 
-                WHEN SUM(vi.amount) <= COALESCE(SUM(p.amount), 0) THEN 'PAID'
-                WHEN COALESCE(SUM(p.amount), 0) > 0 THEN 'PARTIAL'
+                WHEN COALESCE(vt.total_fee, 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
+                WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
                 ELSE 'UNPAID'
               END as status
        FROM fee_vouchers v
@@ -121,10 +144,9 @@ class FeesController {
        JOIN students s ON sch.student_id = s.id
        JOIN classes c ON sch.class_id = c.id
        JOIN sections sec ON sch.section_id = sec.id
-       JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-       LEFT JOIN fee_payments p ON v.id = p.voucher_id
-       WHERE v.id = $1
-       GROUP BY v.id, v.month, s.id, s.name, c.name, sec.name`,
+       LEFT JOIN VoucherTotals vt ON v.id = vt.voucher_id
+       LEFT JOIN PaymentTotals pt ON v.id = pt.voucher_id
+       WHERE v.id = $1`,
       [voucherId]
     );
 
@@ -277,7 +299,7 @@ class FeesController {
   async getDefaulters(req, res, next) {
     const client = await pool.connect();
     try {
-      const { class_id, section_id, min_due_amount = 0 } = req.query;
+      const { class_id, section_id, min_due_amount = 0, overdue_only = 'false' } = req.query;
 
       let query = `
         SELECT 
@@ -316,6 +338,11 @@ class FeesController {
         query += ` AND sec.id = $${paramCount}`;
         params.push(section_id);
         paramCount++;
+      }
+
+      // Filter by overdue vouchers only
+      if (overdue_only === 'true') {
+        query += ` AND v.due_date < CURRENT_DATE`;
       }
 
       query += ` 
@@ -576,7 +603,7 @@ class FeesController {
       client.release();
     }
   }
-  
+
   /**
    * Download payment receipt as PDF
    * GET /api/fees/payment/:id/receipt
@@ -585,16 +612,16 @@ class FeesController {
     try {
       const { id } = req.params;
       const pdfService = require('../services/pdf.service');
-      
+
       const { filepath, filename } = await pdfService.generatePaymentReceipt(id, 'fee');
-      
+
       res.download(filepath, filename, (err) => {
         // Clean up the file after sending
         const fs = require('fs');
         if (fs.existsSync(filepath)) {
           fs.unlinkSync(filepath);
         }
-        
+
         if (err) {
           next(error);
         }

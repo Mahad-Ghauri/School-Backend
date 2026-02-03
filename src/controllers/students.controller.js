@@ -23,6 +23,7 @@ class StudentsController {
     this.addGuardian = this.addGuardian.bind(this);
     this.removeGuardian = this.removeGuardian.bind(this);
     this.transfer = this.transfer.bind(this);
+    this.promote = this.promote.bind(this);
   }
 
   /**
@@ -395,7 +396,7 @@ class StudentsController {
         + (class_id ? ` AND sch.class_id = $${params.indexOf(class_id) + 1}` : '')
         + (section_id ? ` AND sch.section_id = $${params.indexOf(section_id) + 1}` : '')
         + (search ? ` AND (s.name ILIKE $${params.indexOf(`%${search}%`) + 1} OR s.roll_no ILIKE $${params.indexOf(`%${search}%`) + 1} OR s.phone ILIKE $${params.indexOf(`%${search}%`) + 1})` : '');
-      
+
       const countResult = await client.query(countQuery, params);
       const total = parseInt(countResult.rows[0].count);
 
@@ -1024,6 +1025,114 @@ class StudentsController {
       const updatedStudent = await this.getStudentById(client, id);
 
       return ApiResponse.success(res, updatedStudent, 'Student transferred successfully');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Promote student to next class (handles fee structure change)
+   * POST /api/students/:id/promote
+   */
+  async promote(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { id } = req.params;
+      const { class_id, section_id, promotion_date, reset_discount } = req.body;
+
+      // Validate input
+      const schema = Joi.object({
+        class_id: Joi.number().integer().required(),
+        section_id: Joi.number().integer().required(),
+        promotion_date: Joi.date().optional(),
+        reset_discount: Joi.boolean().default(true)
+      });
+
+      const { error } = schema.validate(req.body);
+      if (error) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Get current enrollment
+      const activeEnrollment = await client.query(
+        `SELECT sch.*, c.id as current_class_id 
+         FROM student_class_history sch
+         JOIN classes c ON sch.class_id = c.id
+         WHERE sch.student_id = $1 AND sch.end_date IS NULL`,
+        [id]
+      );
+
+      if (activeEnrollment.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Student has no active enrollment to promote from', 400);
+      }
+
+      const currentClassId = activeEnrollment.rows[0].current_class_id;
+      const promotionDateValue = promotion_date ? new Date(promotion_date) : new Date();
+
+      // Close current class session
+      await client.query(
+        'UPDATE student_class_history SET end_date = $1 WHERE id = $2',
+        [promotionDateValue, activeEnrollment.rows[0].id]
+      );
+
+      // Validate new class and section
+      const classCheck = await client.query(
+        'SELECT id, is_active FROM classes WHERE id = $1',
+        [class_id]
+      );
+
+      if (classCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Class not found', 404);
+      }
+
+      if (!classCheck.rows[0].is_active) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Cannot promote to inactive class', 400);
+      }
+
+      const sectionCheck = await client.query(
+        'SELECT id FROM sections WHERE id = $1 AND class_id = $2',
+        [section_id, class_id]
+      );
+
+      if (sectionCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          'Section not found or does not belong to the specified class',
+          404
+        );
+      }
+
+      // Create new enrollment
+      await client.query(
+        `INSERT INTO student_class_history 
+         (student_id, class_id, section_id, start_date) 
+         VALUES ($1, $2, $3, $4)`,
+        [id, class_id, section_id, promotionDateValue]
+      );
+
+      // Handle discount reset if requested
+      if (reset_discount) {
+        await client.query(
+          'DELETE FROM student_discounts WHERE student_id = $1 AND class_id = $2',
+          [id, currentClassId]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      const updatedStudent = await this.getStudentById(client, id);
+
+      return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Note: Generate the first voucher for the new class to apply one-time fees.');
     } catch (error) {
       await client.query('ROLLBACK');
       next(error);

@@ -18,6 +18,7 @@ router.put('/:id', adminOnly, studentsController.update);
 router.post('/:id/enroll', adminOnly, studentsController.enroll);
 router.post('/:id/withdraw', adminOnly, studentsController.withdraw);
 router.post('/:id/transfer', adminOnly, studentsController.transfer);
+router.post('/:id/promote', adminOnly, studentsController.promote);
 
 // Status management
 router.post('/:id/activate', adminOnly, studentsController.activate);
