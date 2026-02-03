@@ -4,6 +4,17 @@ const r2Service = require('../services/r2.service');
 const Joi = require('joi');
 
 /**
+ * Standard document types for student admission
+ */
+const DOCUMENT_TYPES = {
+  PHOTO: 'PHOTO',
+  BAY_FORM: 'BAY_FORM',
+  FATHER_CNIC: 'FATHER_CNIC',
+  BIRTH_CERTIFICATE: 'BIRTH_CERTIFICATE',
+  CUSTOM: 'CUSTOM'
+};
+
+/**
  * Documents Controller
  * Handles student document uploads and management
  */
@@ -35,7 +46,12 @@ class DocumentsController {
 
       // Validate input
       const schema = Joi.object({
-        document_type: Joi.string().required(),
+        document_type: Joi.string()
+          .valid(...Object.values(DOCUMENT_TYPES))
+          .required()
+          .messages({
+            'any.only': 'Document type must be one of: PHOTO, BAY_FORM, FATHER_CNIC, BIRTH_CERTIFICATE, CUSTOM'
+          }),
         description: Joi.string().optional().allow(null, '')
       });
 
@@ -79,12 +95,20 @@ class DocumentsController {
         ]
       );
 
+      // Generate signed URL for immediate access
+      const signedUrl = await r2Service.getSignedUrl(uploadResult.key);
+
       await client.query('COMMIT');
 
       return ApiResponse.created(res, {
-        document: result.rows[0],
+        document: {
+          ...result.rows[0],
+          file_url: signedUrl,
+          signed_url: signedUrl
+        },
         file: {
-          url: uploadResult.url,
+          url: signedUrl,
+          signed_url: signedUrl,
           size: uploadResult.size,
           type: uploadResult.mimeType
         }
@@ -144,7 +168,21 @@ class DocumentsController {
             description
           ]
         );
-        documents.push(result.rows[0]);
+
+        // Generate signed URL
+        try {
+          const signedUrl = await r2Service.getSignedUrl(uploadResult.key);
+          documents.push({
+            ...result.rows[0],
+            file_url: signedUrl,
+            signed_url: signedUrl
+          });
+        } catch (err) {
+          console.error('Failed to sign URL:', err);
+          documents.push({
+            ...result.rows[0]
+          });
+        }
       }
 
       await client.query('COMMIT');
@@ -191,10 +229,31 @@ class DocumentsController {
 
       const result = await client.query(query, params);
 
+      // Generate signed URLs for all documents
+      const documentsWithUrls = await Promise.all(result.rows.map(async (doc) => {
+        try {
+          // Extract key from file_url (assuming format contains 'students/')
+          // If file_url is absolute, we try to find the relative path
+          let key = doc.file_url;
+          if (doc.file_url.includes('students/')) {
+            key = doc.file_url.substring(doc.file_url.indexOf('students/'));
+          } else if (doc.file_url.includes('documents/')) {
+            // Fallback for default folder
+            key = doc.file_url.substring(doc.file_url.indexOf('documents/'));
+          }
+
+          const signedUrl = await r2Service.getSignedUrl(key);
+          return { ...doc, file_url: signedUrl };
+        } catch (err) {
+          console.error(`Failed to generate signed URL for doc ${doc.id}:`, err);
+          return { ...doc };
+        }
+      }));
+
       return ApiResponse.success(res, {
         student_id: parseInt(id),
-        documents: result.rows,
-        count: result.rows.length
+        documents: documentsWithUrls,
+        count: documentsWithUrls.length
       });
     } catch (error) {
       next(error);
@@ -224,7 +283,23 @@ class DocumentsController {
         return ApiResponse.error(res, 'Document not found', 404);
       }
 
-      return ApiResponse.success(res, result.rows[0]);
+      const doc = result.rows[0];
+
+      try {
+        let key = doc.file_url;
+        if (doc.file_url.includes('students/')) {
+          key = doc.file_url.substring(doc.file_url.indexOf('students/'));
+        } else if (doc.file_url.includes('documents/')) {
+          key = doc.file_url.substring(doc.file_url.indexOf('documents/'));
+        }
+
+        doc.file_url = await r2Service.getSignedUrl(key);
+      } catch (err) {
+        console.error(`Failed to generate signed URL for doc ${doc.id}:`, err);
+        // Keep original
+      }
+
+      return ApiResponse.success(res, doc);
     } catch (error) {
       next(error);
     } finally {
@@ -254,8 +329,8 @@ class DocumentsController {
       const document = result.rows[0];
 
       // Extract key from URL
-      const key = document.file_url.split('.r2.dev/')[1] || 
-                  document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
+      const key = document.file_url.split('.r2.dev/')[1] ||
+        document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
 
       // Download from R2
       const fileData = await r2Service.downloadFile(key);
@@ -297,8 +372,8 @@ class DocumentsController {
       const document = result.rows[0];
 
       // Extract key from URL
-      const key = document.file_url.split('.r2.dev/')[1] || 
-                  document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
+      const key = document.file_url.split('.r2.dev/')[1] ||
+        document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
 
       // Generate signed URL
       const signedUrl = await r2Service.getSignedUrl(key, parseInt(expires));
@@ -340,8 +415,8 @@ class DocumentsController {
       const document = result.rows[0];
 
       // Extract key from URL
-      const key = document.file_url.split('.r2.dev/')[1] || 
-                  document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
+      const key = document.file_url.split('.r2.dev/')[1] ||
+        document.file_url.split(process.env.R2_PUBLIC_URL + '/')[1];
 
       // Delete from R2
       await r2Service.deleteFile(key);
@@ -353,6 +428,14 @@ class DocumentsController {
       );
 
       await client.query('COMMIT');
+
+      // Generate signed URL for response (consistency)
+      try {
+        const signedUrl = await r2Service.getSignedUrl(key);
+        document.file_url = signedUrl;
+      } catch (err) {
+        // Keep original
+      }
 
       return ApiResponse.success(res, document, 'Document deleted successfully');
     } catch (error) {
@@ -378,6 +461,14 @@ class DocumentsController {
       let paramCount = 1;
 
       if (document_type) {
+        // Validate document type
+        if (!Object.values(DOCUMENT_TYPES).includes(document_type)) {
+          return ApiResponse.error(
+            res,
+            'Document type must be one of: PHOTO, BAY_FORM, FATHER_CNIC, BIRTH_CERTIFICATE, CUSTOM',
+            400
+          );
+        }
         updates.push(`document_type = $${paramCount}`);
         values.push(document_type);
         paramCount++;
@@ -407,7 +498,21 @@ class DocumentsController {
         return ApiResponse.error(res, 'Document not found', 404);
       }
 
-      return ApiResponse.success(res, result.rows[0], 'Document updated successfully');
+      const doc = result.rows[0];
+      try {
+        let key = doc.file_url;
+        if (doc.file_url.includes('students/')) {
+          key = doc.file_url.substring(doc.file_url.indexOf('students/'));
+        } else if (doc.file_url.includes('documents/')) {
+          key = doc.file_url.substring(doc.file_url.indexOf('documents/'));
+        }
+
+        doc.file_url = await r2Service.getSignedUrl(key);
+      } catch (err) {
+        // Keep original
+      }
+
+      return ApiResponse.success(res, doc, 'Document updated successfully');
     } catch (error) {
       next(error);
     } finally {
