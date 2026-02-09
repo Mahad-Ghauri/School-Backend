@@ -1043,20 +1043,47 @@ class StudentsController {
       await client.query('BEGIN');
 
       const { id } = req.params;
-      const { class_id, section_id, promotion_date, reset_discount } = req.body;
+      const { class_id, section_id, promotion_date, reset_discount, force = false } = req.body;
 
       // Validate input
       const schema = Joi.object({
         class_id: Joi.number().integer().required(),
         section_id: Joi.number().integer().required(),
         promotion_date: Joi.date().optional(),
-        reset_discount: Joi.boolean().default(true)
+        reset_discount: Joi.boolean().default(true),
+        force: Joi.boolean().default(false)
       });
 
       const { error } = schema.validate(req.body);
       if (error) {
         await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Check for arrears (unless forced)
+      if (!force) {
+        const arrearsResult = await client.query(
+          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
+           FROM fee_vouchers v
+           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+           LEFT JOIN (
+             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
+           ) p ON v.id = p.voucher_id
+           JOIN student_class_history sch ON v.student_class_history_id = sch.id
+           WHERE sch.student_id = $1`,
+          [id]
+        );
+
+        const totalDue = parseFloat(arrearsResult.rows[0].total_due) || 0;
+        if (totalDue > 0) {
+          await client.query('ROLLBACK');
+          return ApiResponse.error(
+            res,
+            `Cannot promote student with outstanding dues of ${totalDue}. Use force=true to override.`,
+            400,
+            { due_amount: totalDue }
+          );
+        }
       }
 
       // Get current enrollment
@@ -1132,7 +1159,7 @@ class StudentsController {
 
       const updatedStudent = await this.getStudentById(client, id);
 
-      return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Note: Generate the first voucher for the new class to apply one-time fees.');
+      return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Note: Generate the first voucher for the new class to apply promotion/admission fees.');
     } catch (error) {
       await client.query('ROLLBACK');
       next(error);

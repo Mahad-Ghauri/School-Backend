@@ -34,7 +34,8 @@ class ClassesController {
         fee_structure: Joi.object({
           admission_fee: Joi.number().min(0).default(0),
           monthly_fee: Joi.number().min(0).default(0),
-          paper_fund: Joi.number().min(0).default(0)
+          paper_fund: Joi.number().min(0).default(0),
+          promotion_fee: Joi.number().min(0).default(0)
         }).optional()
       });
 
@@ -59,13 +60,14 @@ class ClassesController {
       if (fee_structure) {
         await client.query(
           `INSERT INTO class_fee_structure 
-           (class_id, effective_from, admission_fee, monthly_fee, paper_fund) 
-           VALUES ($1, CURRENT_DATE, $2, $3, $4)`,
+           (class_id, effective_from, admission_fee, monthly_fee, paper_fund, promotion_fee) 
+           VALUES ($1, CURRENT_DATE, $2, $3, $4, $5)`,
           [
             newClass.id,
             fee_structure.admission_fee || 0,
             fee_structure.monthly_fee || 0,
-            fee_structure.paper_fund || 0
+            fee_structure.paper_fund || 0,
+            fee_structure.promotion_fee || 0
           ]
         );
       }
@@ -160,11 +162,11 @@ class ClassesController {
   async list(req, res, next) {
     const client = await pool.connect();
     try {
-      const { 
-        class_type, 
+      const {
+        class_type,
         is_active = true,
-        page = 1, 
-        limit = 50 
+        page = 1,
+        limit = 50
       } = req.query;
 
       let query = `
@@ -314,6 +316,7 @@ class ClassesController {
         admission_fee: Joi.number().min(0).required(),
         monthly_fee: Joi.number().min(0).required(),
         paper_fund: Joi.number().min(0).required(),
+        promotion_fee: Joi.number().min(0).default(0),
         effective_from: Joi.date().optional()
       });
 
@@ -335,10 +338,10 @@ class ClassesController {
       // Insert new fee structure
       const result = await client.query(
         `INSERT INTO class_fee_structure 
-         (class_id, effective_from, admission_fee, monthly_fee, paper_fund) 
-         VALUES ($1, $2, $3, $4, $5) 
+         (class_id, effective_from, admission_fee, monthly_fee, paper_fund, promotion_fee) 
+         VALUES ($1, $2, $3, $4, $5, $6) 
          RETURNING *`,
-        [id, effective_from || new Date(), admission_fee, monthly_fee, paper_fund]
+        [id, effective_from || new Date(), admission_fee, monthly_fee, paper_fund, promotion_fee || 0]
       );
 
       return ApiResponse.success(

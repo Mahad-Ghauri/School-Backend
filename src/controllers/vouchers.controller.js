@@ -87,7 +87,7 @@ class VouchersController {
 
       // Get current fee structure for the class
       const feeStructure = await client.query(
-        `SELECT admission_fee, monthly_fee, paper_fund
+        `SELECT admission_fee, monthly_fee, paper_fund, promotion_fee
          FROM class_fee_structure 
          WHERE class_id = $1
          ORDER BY effective_from DESC
@@ -129,11 +129,31 @@ class VouchersController {
       // Build fee items based on fee_types parameter or smart logic
       let feeItems = [];
 
+      // 1. One-time fees (Admission)
       if (fee_types && fee_types.length > 0) {
-        // Manual fee_types specified - use them
         if (fee_types.includes('ADMISSION')) {
           feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
         }
+      } else if (isFirstEnrollment) {
+        feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+      }
+
+      // 2. Promotion fee (if applicable)
+      const promotionFee = parseFloat(fees.promotion_fee) || 0;
+      if (isFirstEnrollment && promotionFee > 0) {
+        // Check if student has previous history to confirm this is a promotion
+        const historyCheck = await client.query(
+          `SELECT COUNT(*) as count FROM student_class_history 
+           WHERE student_id = $1 AND end_date IS NOT NULL`,
+          [student_id]
+        );
+        if (parseInt(historyCheck.rows[0].count) > 0) {
+          feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+        }
+      }
+
+      // 3. Recurring fees (Monthly, Paper Fund)
+      if (fee_types && fee_types.length > 0) {
         if (fee_types.includes('MONTHLY')) {
           feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
         }
@@ -141,19 +161,32 @@ class VouchersController {
           feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
         }
       } else {
-        // Smart logic: One-time fees only on first voucher for this class
-        if (isFirstEnrollment) {
-          // First voucher for this class - include one-time fees
-          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
-        }
-        // Always include recurring fees
         feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
         feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
       }
 
+      // 4. Arrears logic (Smart inclusion)
+      const arrearsResult = await client.query(
+        `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
+         FROM fee_vouchers v
+         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+         LEFT JOIN (
+           SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
+         ) p ON v.id = p.voucher_id
+         JOIN student_class_history sch ON v.student_class_history_id = sch.id
+         WHERE sch.student_id = $1
+         AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
+        [student_id, month]
+      );
+
+      const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
+      if (totalArrears > 0) {
+        feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
+      }
+
       // Insert fee items
       for (const item of feeItems) {
-        if (item.amount > 0) {
+        if (item.amount !== 0) {
           await client.query(
             `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
              VALUES ($1, $2, $3)`,
@@ -243,7 +276,7 @@ class VouchersController {
 
       // Get fee structure for the class
       const feeStructure = await client.query(
-        `SELECT admission_fee, monthly_fee, paper_fund
+        `SELECT admission_fee, monthly_fee, paper_fund, promotion_fee
          FROM class_fee_structure
          WHERE class_id = $1
          ORDER BY effective_from DESC
@@ -329,11 +362,31 @@ class VouchersController {
           // Build fee items for this student
           let feeItems = [];
 
+          // 1. One-time fees (Admission)
           if (fee_types && fee_types.length > 0) {
-            // Manual fee_types specified - use them
             if (fee_types.includes('ADMISSION')) {
               feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
             }
+          } else if (isFirstEnrollment) {
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+          }
+
+          // 2. Promotion fee (if applicable)
+          const promotionFee = parseFloat(fees.promotion_fee) || 0;
+          if (isFirstEnrollment && promotionFee > 0) {
+            // Check if student has previous history to confirm this is a promotion
+            const historyCheck = await client.query(
+              `SELECT COUNT(*) as count FROM student_class_history 
+               WHERE student_id = $1 AND end_date IS NOT NULL`,
+              [student.student_id]
+            );
+            if (parseInt(historyCheck.rows[0].count) > 0) {
+              feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+            }
+          }
+
+          // 3. Recurring fees (Monthly, Paper Fund)
+          if (fee_types && fee_types.length > 0) {
             if (fee_types.includes('MONTHLY')) {
               feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
             }
@@ -341,14 +394,27 @@ class VouchersController {
               feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
             }
           } else {
-            // Smart logic: One-time fees only on first voucher for this class
-            if (isFirstEnrollment) {
-              // First voucher for this class - include one-time fees
-              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
-            }
-            // Always include recurring fees
             feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
             feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+          }
+
+          // 4. Arrears logic (Smart inclusion)
+          const arrearsResult = await client.query(
+            `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
+             FROM fee_vouchers v
+             JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+             LEFT JOIN (
+               SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
+             ) p ON v.id = p.voucher_id
+             JOIN student_class_history sch ON v.student_class_history_id = sch.id
+             WHERE sch.student_id = $1
+             AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
+            [student.student_id, month]
+          );
+
+          const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
+          if (totalArrears > 0) {
+            feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
           }
 
           // Create voucher with due date
@@ -363,7 +429,7 @@ class VouchersController {
 
           // Insert fee items
           for (const item of feeItems) {
-            if (item.amount > 0) {
+            if (item.amount !== 0) {
               await client.query(
                 `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
                  VALUES ($1, $2, $3)`,
