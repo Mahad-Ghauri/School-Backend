@@ -540,34 +540,53 @@ class FeesController {
       }
 
       const stats = await client.query(`
+        WITH voucher_totals AS (
+          SELECT 
+            v.id as voucher_id,
+            sch.student_id,
+            c.id as class_id,
+            SUM(vi.amount) as voucher_total,
+            COALESCE((
+              SELECT SUM(p.amount) 
+              FROM fee_payments p 
+              WHERE p.voucher_id = v.id ${dateFilter}
+            ), 0) as paid_total,
+            CASE 
+              WHEN SUM(vi.amount) <= COALESCE((
+                SELECT SUM(p2.amount) 
+                FROM fee_payments p2 
+                WHERE p2.voucher_id = v.id
+              ), 0) THEN 'PAID'
+              WHEN COALESCE((
+                SELECT SUM(p3.amount) 
+                FROM fee_payments p3 
+                WHERE p3.voucher_id = v.id
+              ), 0) > 0 THEN 'PARTIAL'
+              ELSE 'UNPAID'
+            END as status
+          FROM fee_vouchers v
+          JOIN student_class_history sch ON v.student_class_history_id = sch.id
+          JOIN classes c ON sch.class_id = c.id
+          JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+          WHERE 1=1 ${classFilter}
+          GROUP BY v.id, sch.student_id, c.id
+        ),
+        payment_counts AS (
+          SELECT COUNT(DISTINCT p.id) as total_payments
+          FROM fee_payments p
+          WHERE 1=1 ${dateFilter.replace(/p\./g, 'p.')}
+        )
         SELECT 
-          COUNT(DISTINCT v.id) as total_vouchers,
-          COUNT(DISTINCT CASE WHEN v_status.status = 'PAID' THEN v.id END) as paid_vouchers,
-          COUNT(DISTINCT CASE WHEN v_status.status = 'UNPAID' THEN v.id END) as unpaid_vouchers,
-          COUNT(DISTINCT CASE WHEN v_status.status = 'PARTIAL' THEN v.id END) as partial_vouchers,
-          COALESCE(SUM(vi.amount), 0) as total_fee_generated,
-          COALESCE(SUM(p.amount), 0) as total_collected,
-          COALESCE(SUM(vi.amount) - SUM(p.amount), SUM(vi.amount), 0) as total_pending,
-          COUNT(DISTINCT p.id) as total_payments,
-          COUNT(DISTINCT s.id) as total_students
-        FROM fee_vouchers v
-        JOIN student_class_history sch ON v.student_class_history_id = sch.id
-        JOIN students s ON sch.student_id = s.id
-        JOIN classes c ON sch.class_id = c.id
-        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-        LEFT JOIN fee_payments p ON v.id = p.voucher_id ${dateFilter}
-        LEFT JOIN LATERAL (
-          SELECT CASE 
-            WHEN SUM(vi2.amount) <= COALESCE(SUM(p2.amount), 0) THEN 'PAID'
-            WHEN COALESCE(SUM(p2.amount), 0) > 0 THEN 'PARTIAL'
-            ELSE 'UNPAID'
-          END as status
-          FROM fee_voucher_items vi2
-          LEFT JOIN fee_payments p2 ON v.id = p2.voucher_id
-          WHERE vi2.voucher_id = v.id
-          GROUP BY v.id
-        ) v_status ON true
-        WHERE 1=1 ${classFilter}
+          COUNT(DISTINCT voucher_id) as total_vouchers,
+          COUNT(DISTINCT CASE WHEN status = 'PAID' THEN voucher_id END) as paid_vouchers,
+          COUNT(DISTINCT CASE WHEN status = 'UNPAID' THEN voucher_id END) as unpaid_vouchers,
+          COUNT(DISTINCT CASE WHEN status = 'PARTIAL' THEN voucher_id END) as partial_vouchers,
+          COALESCE(SUM(voucher_total), 0) as total_fee_generated,
+          COALESCE(SUM(paid_total), 0) as total_collected,
+          COALESCE(SUM(voucher_total) - SUM(paid_total), 0) as total_pending,
+          (SELECT total_payments FROM payment_counts) as total_payments,
+          COUNT(DISTINCT student_id) as total_students
+        FROM voucher_totals
       `, params);
 
       return ApiResponse.success(res, stats.rows[0]);
