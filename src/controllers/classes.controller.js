@@ -309,7 +309,7 @@ class ClassesController {
     const client = await pool.connect();
     try {
       const { id } = req.params;
-      const { admission_fee, monthly_fee, paper_fund, effective_from } = req.body;
+      const { admission_fee, monthly_fee, paper_fund, promotion_fee, effective_from } = req.body;
 
       // Validate input
       const schema = Joi.object({
