@@ -11,11 +11,14 @@ class VouchersController {
     // Bind all methods to preserve 'this' context
     this.generate = this.generate.bind(this);
     this.generateBulk = this.generateBulk.bind(this);
+    this.previewBulk = this.previewBulk.bind(this);
+    this.generateBulkPDF = this.generateBulkPDF.bind(this);
     this.list = this.list.bind(this);
     this.getById = this.getById.bind(this);
     this.updateItems = this.updateItems.bind(this);
     this.delete = this.delete.bind(this);
     this.downloadPDF = this.downloadPDF.bind(this);
+    this.printPDF = this.printPDF.bind(this);
   }
 
   /**
@@ -101,6 +104,28 @@ class VouchersController {
 
       const fees = feeStructure.rows[0];
 
+      // Check for student-specific fee overrides
+      const feeOverrideResult = await client.query(
+        `SELECT admission_fee, monthly_fee, paper_fund 
+         FROM student_fee_overrides
+         WHERE student_id = $1 AND class_id = $2`,
+        [student_id, enrollment.class_id]
+      );
+
+      // Use override fees if they exist, otherwise use class defaults
+      const effectiveFees = {
+        admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
+          ? feeOverrideResult.rows[0].admission_fee
+          : fees.admission_fee,
+        monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+          ? feeOverrideResult.rows[0].monthly_fee
+          : fees.monthly_fee,
+        paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
+          ? feeOverrideResult.rows[0].paper_fund
+          : fees.paper_fund,
+        promotion_fee: fees.promotion_fee // Promotion fee is not overridable
+      };
+
       // Determine if this is the first voucher for this class enrollment
       // Check BEFORE creating the voucher
       const existingVouchersCount = await client.query(
@@ -132,14 +157,14 @@ class VouchersController {
       // 1. One-time fees (Admission)
       if (fee_types && fee_types.length > 0) {
         if (fee_types.includes('ADMISSION')) {
-          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
         }
       } else if (isFirstEnrollment) {
-        feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+        feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
       }
 
       // 2. Promotion fee (if applicable)
-      const promotionFee = parseFloat(fees.promotion_fee) || 0;
+      const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
       if (isFirstEnrollment && promotionFee > 0) {
         // Check if student has previous history to confirm this is a promotion
         const historyCheck = await client.query(
@@ -155,14 +180,14 @@ class VouchersController {
       // 3. Recurring fees (Monthly, Paper Fund)
       if (fee_types && fee_types.length > 0) {
         if (fee_types.includes('MONTHLY')) {
-          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
         }
         if (fee_types.includes('PAPER_FUND')) {
-          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
         }
       } else {
-        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
-        feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+        feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
       }
 
       // 4. Arrears logic (Smart inclusion)
@@ -350,6 +375,28 @@ class VouchersController {
             continue;
           }
 
+          // Check for student-specific fee overrides
+          const feeOverrideResult = await client.query(
+            `SELECT admission_fee, monthly_fee, paper_fund 
+             FROM student_fee_overrides
+             WHERE student_id = $1 AND class_id = $2`,
+            [student.student_id, class_id]
+          );
+
+          // Use override fees if they exist, otherwise use class defaults
+          const effectiveFees = {
+            admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
+              ? feeOverrideResult.rows[0].admission_fee
+              : fees.admission_fee,
+            monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+              ? feeOverrideResult.rows[0].monthly_fee
+              : fees.monthly_fee,
+            paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
+              ? feeOverrideResult.rows[0].paper_fund
+              : fees.paper_fund,
+            promotion_fee: fees.promotion_fee
+          };
+
           // Determine if this is the first voucher for this class enrollment
           const isFirstVoucherForClass = await client.query(
             `SELECT 1 FROM fee_vouchers fv
@@ -365,14 +412,14 @@ class VouchersController {
           // 1. One-time fees (Admission)
           if (fee_types && fee_types.length > 0) {
             if (fee_types.includes('ADMISSION')) {
-              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
             }
           } else if (isFirstEnrollment) {
-            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(fees.admission_fee) || 0 });
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
           }
 
           // 2. Promotion fee (if applicable)
-          const promotionFee = parseFloat(fees.promotion_fee) || 0;
+          const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
           if (isFirstEnrollment && promotionFee > 0) {
             // Check if student has previous history to confirm this is a promotion
             const historyCheck = await client.query(
@@ -388,14 +435,14 @@ class VouchersController {
           // 3. Recurring fees (Monthly, Paper Fund)
           if (fee_types && fee_types.length > 0) {
             if (fee_types.includes('MONTHLY')) {
-              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
             }
             if (fee_types.includes('PAPER_FUND')) {
-              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
             }
           } else {
-            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(fees.monthly_fee) || 0 });
-            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(fees.paper_fund) || 0 });
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
           }
 
           // 4. Arrears logic (Smart inclusion)
@@ -885,6 +932,492 @@ class VouchersController {
       });
     } catch (error) {
       next(error);
+    }
+  }
+
+  /**
+   * Print fee voucher as PDF (inline, not download)
+   * GET /api/vouchers/:id/print
+   */
+  async printPDF(req, res, next) {
+    try {
+      const { id } = req.params;
+      const pdfService = require('../services/pdf.service');
+
+      const { filepath, filename } = await pdfService.generateFeeVoucher(id);
+
+      // Set headers for inline display (for printing)
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+
+      const fs = require('fs');
+      const fileStream = fs.createReadStream(filepath);
+      
+      fileStream.pipe(res);
+      
+      fileStream.on('end', () => {
+        // Clean up the file after sending
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+      });
+
+      fileStream.on('error', (err) => {
+        // Clean up on error
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        next(err);
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Preview bulk voucher generation (without creating them)
+   * POST /api/vouchers/preview-bulk
+   */
+  async previewBulk(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { class_id, section_id, month, fee_types, due_date } = req.body;
+
+      // Validate input
+      const schema = Joi.object({
+        class_id: Joi.number().integer().required(),
+        section_id: Joi.number().integer().optional(),
+        month: Joi.date().required(),
+        due_date: Joi.date().optional(),
+        fee_types: Joi.array().items(
+          Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional()
+      });
+
+      const { error } = schema.validate(req.body);
+      if (error) {
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Get fee structure for the class
+      const feeStructure = await client.query(
+        `SELECT admission_fee, monthly_fee, paper_fund, promotion_fee
+         FROM class_fee_structure
+         WHERE class_id = $1
+         ORDER BY effective_from DESC
+         LIMIT 1`,
+        [class_id]
+      );
+
+      if (feeStructure.rows.length === 0) {
+        return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
+      }
+
+      const fees = feeStructure.rows[0];
+
+      // Get all enrolled students in class/section
+      let query = `
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no
+        FROM student_class_history sch
+        JOIN students s ON sch.student_id = s.id
+        WHERE sch.class_id = $1 
+        AND sch.end_date IS NULL
+        AND s.is_active = true
+      `;
+
+      const params = [class_id];
+      if (section_id) {
+        query += ` AND sch.section_id = $2`;
+        params.push(section_id);
+      }
+
+      const students = await client.query(query, params);
+
+      if (students.rows.length === 0) {
+        return ApiResponse.error(res, 'No active students found in this class/section', 404);
+      }
+
+      const preview = [];
+
+      for (const student of students.rows) {
+        // Check for duplicate
+        const duplicateCheck = await client.query(
+          `SELECT id FROM fee_vouchers 
+           WHERE student_class_history_id = $1 
+           AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
+          [student.enrollment_id, month]
+        );
+
+        if (duplicateCheck.rows.length > 0) {
+          continue; // Skip students who already have a voucher for this month
+        }
+
+        // Check for student-specific fee overrides
+        const feeOverrideResult = await client.query(
+          `SELECT admission_fee, monthly_fee, paper_fund 
+           FROM student_fee_overrides
+           WHERE student_id = $1 AND class_id = $2`,
+          [student.student_id, class_id]
+        );
+
+        // Use override fees if they exist, otherwise use class defaults
+        const effectiveFees = {
+          admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
+            ? feeOverrideResult.rows[0].admission_fee
+            : fees.admission_fee,
+          monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+            ? feeOverrideResult.rows[0].monthly_fee
+            : fees.monthly_fee,
+          paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
+            ? feeOverrideResult.rows[0].paper_fund
+            : fees.paper_fund,
+          promotion_fee: fees.promotion_fee
+        };
+
+        // Determine if this is the first voucher for this class enrollment
+        const isFirstVoucherForClass = await client.query(
+          `SELECT 1 FROM fee_vouchers fv
+           WHERE fv.student_class_history_id = $1
+           LIMIT 1`,
+          [student.enrollment_id]
+        );
+        const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+
+        // Build fee items for this student
+        let feeItems = [];
+
+        // 1. One-time fees (Admission)
+        if (fee_types && fee_types.length > 0) {
+          if (fee_types.includes('ADMISSION')) {
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+        }
+
+        // 2. Promotion fee (if applicable)
+        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+        if (isFirstEnrollment && promotionFee > 0) {
+          const historyCheck = await client.query(
+            `SELECT COUNT(*) as count FROM student_class_history 
+             WHERE student_id = $1 AND end_date IS NOT NULL`,
+            [student.student_id]
+          );
+          if (parseInt(historyCheck.rows[0].count) > 0) {
+            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          }
+        }
+
+        // 3. Recurring fees (Monthly, Paper Fund)
+        if (fee_types && fee_types.length > 0) {
+          if (fee_types.includes('MONTHLY')) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          }
+          if (fee_types.includes('PAPER_FUND')) {
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          }
+        } else {
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+        }
+
+        // 4. Arrears logic
+        const arrearsResult = await client.query(
+          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
+           FROM fee_vouchers v
+           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+           LEFT JOIN (
+             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
+           ) p ON v.id = p.voucher_id
+           JOIN student_class_history sch ON v.student_class_history_id = sch.id
+           WHERE sch.student_id = $1
+           AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
+          [student.student_id, month]
+        );
+
+        const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
+        if (totalArrears > 0) {
+          feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
+        }
+
+        // Apply discount if exists
+        const discountResult = await client.query(
+          `SELECT discount_type, discount_value FROM student_discounts
+           WHERE student_id = $1 AND class_id = $2`,
+          [student.student_id, class_id]
+        );
+
+        let discountAmount = 0;
+        if (discountResult.rows.length > 0) {
+          const discount = discountResult.rows[0];
+          if (discount.discount_type === 'PERCENTAGE') {
+            const totalFees = feeItems.reduce((sum, item) => sum + item.amount, 0);
+            discountAmount = (totalFees * parseFloat(discount.discount_value)) / 100;
+          } else {
+            discountAmount = parseFloat(discount.discount_value);
+          }
+
+          if (discountAmount > 0) {
+            feeItems.push({ item_type: 'DISCOUNT', amount: -discountAmount });
+          }
+        }
+
+        const totalAmount = feeItems.reduce((sum, item) => sum + item.amount, 0);
+
+        preview.push({
+          student_id: student.student_id,
+          student_name: student.student_name,
+          roll_no: student.roll_no,
+          items: feeItems,
+          total_amount: totalAmount
+        });
+      }
+
+      return ApiResponse.success(res, {
+        summary: {
+          total_students: preview.length,
+          month: new Date(month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+        },
+        vouchers: preview
+      }, 'Bulk voucher preview generated successfully');
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Generate bulk vouchers as PDF without saving to database
+   * POST /api/vouchers/generate-bulk-pdf
+   */
+  async generateBulkPDF(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { class_id, section_id, month, fee_types, due_date } = req.body;
+
+      // Validate input
+      const schema = Joi.object({
+        class_id: Joi.number().integer().required(),
+        section_id: Joi.number().integer().optional(),
+        month: Joi.date().required(),
+        due_date: Joi.date().optional(),
+        fee_types: Joi.array().items(
+          Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional()
+      });
+
+      const { error } = schema.validate(req.body);
+      if (error) {
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Get preview data using the same logic
+      const { class_id: classId, section_id: sectionId, month: voucherMonth, fee_types: feeTypes, due_date: dueDate } = req.body;
+      
+      // Get fee structure for the class
+      const feeStructure = await client.query(
+        `SELECT admission_fee, monthly_fee, paper_fund, promotion_fee
+         FROM class_fee_structure
+         WHERE class_id = $1
+         ORDER BY effective_from DESC
+         LIMIT 1`,
+        [classId]
+      );
+
+      if (feeStructure.rows.length === 0) {
+        return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
+      }
+
+      const fees = feeStructure.rows[0];
+
+      // Get class and section names
+      const classInfo = await client.query(
+        `SELECT c.name as class_name, c.class_type, s.name as section_name
+         FROM classes c
+         LEFT JOIN sections s ON s.id = $2
+         WHERE c.id = $1`,
+        [classId, sectionId || null]
+      );
+
+      // Get all enrolled students in class/section
+      let query = `
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no
+        FROM student_class_history sch
+        JOIN students s ON sch.student_id = s.id
+        WHERE sch.class_id = $1 
+        AND sch.end_date IS NULL
+        AND s.is_active = true
+      `;
+
+      const params = [classId];
+      if (sectionId) {
+        query += ` AND sch.section_id = $2`;
+        params.push(sectionId);
+      }
+
+      query += ` ORDER BY s.roll_no, s.name`;
+
+      const students = await client.query(query, params);
+
+      if (students.rows.length === 0) {
+        return ApiResponse.error(res, 'No active students found in this class/section', 404);
+      }
+
+      const vouchersData = [];
+
+      for (const student of students.rows) {
+        // Check for duplicate
+        const duplicateCheck = await client.query(
+          `SELECT id FROM fee_vouchers 
+           WHERE student_class_history_id = $1 
+           AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
+          [student.enrollment_id, voucherMonth]
+        );
+
+        if (duplicateCheck.rows.length > 0) {
+          continue;
+        }
+
+        // Check for student-specific fee overrides
+        const feeOverrideResult = await client.query(
+          `SELECT admission_fee, monthly_fee, paper_fund 
+           FROM student_fee_overrides
+           WHERE student_id = $1 AND class_id = $2`,
+          [student.student_id, classId]
+        );
+
+        const effectiveFees = {
+          admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
+            ? feeOverrideResult.rows[0].admission_fee
+            : fees.admission_fee,
+          monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+            ? feeOverrideResult.rows[0].monthly_fee
+            : fees.monthly_fee,
+          paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
+            ? feeOverrideResult.rows[0].paper_fund
+            : fees.paper_fund,
+          promotion_fee: fees.promotion_fee
+        };
+
+        const isFirstVoucherForClass = await client.query(
+          `SELECT 1 FROM fee_vouchers fv WHERE fv.student_class_history_id = $1 LIMIT 1`,
+          [student.enrollment_id]
+        );
+        const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+
+        let feeItems = [];
+
+        if (feeTypes && feeTypes.length > 0) {
+          if (feeTypes.includes('ADMISSION')) {
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+        }
+
+        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+        if (isFirstEnrollment && promotionFee > 0) {
+          const historyCheck = await client.query(
+            `SELECT COUNT(*) as count FROM student_class_history 
+             WHERE student_id = $1 AND end_date IS NOT NULL`,
+            [student.student_id]
+          );
+          if (parseInt(historyCheck.rows[0].count) > 0) {
+            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          }
+        }
+
+        if (feeTypes && feeTypes.length > 0) {
+          if (feeTypes.includes('MONTHLY')) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          }
+          if (feeTypes.includes('PAPER_FUND')) {
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          }
+        } else {
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+        }
+
+        const arrearsResult = await client.query(
+          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
+           FROM fee_vouchers v
+           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+           LEFT JOIN (
+             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
+           ) p ON v.id = p.voucher_id
+           JOIN student_class_history sch ON v.student_class_history_id = sch.id
+           WHERE sch.student_id = $1
+           AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
+          [student.student_id, voucherMonth]
+        );
+
+        const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
+        if (totalArrears > 0) {
+          feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
+        }
+
+        const discountResult = await client.query(
+          `SELECT discount_type, discount_value FROM student_discounts
+           WHERE student_id = $1 AND class_id = $2`,
+          [student.student_id, classId]
+        );
+
+        if (discountResult.rows.length > 0) {
+          const discount = discountResult.rows[0];
+          let discountAmount = 0;
+          if (discount.discount_type === 'PERCENTAGE') {
+            const totalFees = feeItems.reduce((sum, item) => sum + item.amount, 0);
+            discountAmount = (totalFees * parseFloat(discount.discount_value)) / 100;
+          } else {
+            discountAmount = parseFloat(discount.discount_value);
+          }
+          if (discountAmount > 0) {
+            feeItems.push({ item_type: 'DISCOUNT', amount: -discountAmount });
+          }
+        }
+
+        vouchersData.push({
+          student_name: student.student_name,
+          roll_no: student.roll_no,
+          class_name: classInfo.rows[0].class_name,
+          class_type: classInfo.rows[0].class_type,
+          section_name: classInfo.rows[0].section_name || 'N/A',
+          month: voucherMonth,
+          items: feeItems
+        });
+      }
+
+      // Generate PDF using pdf.service
+      const pdfService = require('../services/pdf.service');
+      const { filepath, filename } = await pdfService.generateBulkFeeVouchers(vouchersData);
+
+      // Send PDF for printing (inline)
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+
+      const fs = require('fs');
+      const fileStream = fs.createReadStream(filepath);
+      
+      fileStream.pipe(res);
+      
+      fileStream.on('end', () => {
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+      });
+
+      fileStream.on('error', (err) => {
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        next(err);
+      });
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
     }
   }
 }

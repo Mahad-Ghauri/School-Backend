@@ -16,6 +16,12 @@ router.post('/generate', adminOnly, vouchersController.generate);
 // Generate bulk vouchers for class/section (admin only)
 router.post('/generate-bulk', adminOnly, vouchersController.generateBulk);
 
+// Preview bulk vouchers without creating them (admin only)
+router.post('/preview-bulk', adminOnly, vouchersController.previewBulk);
+
+// Generate bulk vouchers as PDF without saving to database (admin only)
+router.post('/generate-bulk-pdf', adminOnly, vouchersController.generateBulkPDF);
+
 /**
  * Voucher Management Routes
  */
@@ -27,6 +33,9 @@ router.get('/:id', staffOnly, vouchersController.getById);
 
 // Download voucher as PDF (staff can download)
 router.get('/:id/pdf', staffOnly, vouchersController.downloadPDF);
+
+// Print voucher as PDF inline (staff can print)
+router.get('/:id/print', staffOnly, vouchersController.printPDF);
 
 // Update voucher items (admin only)
 router.put('/:id/items', adminOnly, vouchersController.updateItems);

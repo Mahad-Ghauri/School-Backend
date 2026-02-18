@@ -732,6 +732,99 @@ class PDFService {
 
     return words.trim();
   }
+
+  /**
+   * Generate Bulk Fee Vouchers PDF
+   * Generates a single PDF containing multiple fee vouchers
+   */
+  async generateBulkFeeVouchers(vouchersData) {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const filename = `bulk-fee-vouchers-${Date.now()}.pdf`;
+      const filepath = path.join('/tmp', filename);
+      const stream = fs.createWriteStream(filepath);
+
+      doc.pipe(stream);
+
+      let isFirstPage = true;
+
+      for (const voucherData of vouchersData) {
+        if (!isFirstPage) {
+          doc.addPage();
+        }
+        isFirstPage = false;
+
+        // Add header
+        this.addHeader(doc, 'FEE VOUCHER');
+
+        // Voucher details
+        const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { 
+          month: 'long', 
+          year: 'numeric' 
+        });
+
+        this.addTwoColumns(
+          doc,
+          {
+            'Student Name': voucherData.student_name,
+            'Roll No': voucherData.roll_no || 'N/A',
+            'Class': `${voucherData.class_name} (${voucherData.class_type})`
+          },
+          {
+            'Section': voucherData.section_name,
+            'Issue Date': new Date().toLocaleDateString(),
+            'Fee Month': monthStr
+          },
+          doc.y
+        );
+
+        doc.moveDown(2);
+
+        // Fee items table
+        const totalAmount = voucherData.items.reduce((sum, item) => sum + item.amount, 0);
+
+        const tableY = this.createTable(
+          doc,
+          ['Fee Description', 'Amount (Rs.)'],
+          voucherData.items.map(item => [
+            item.item_type.replace('_', ' '),
+            parseFloat(item.amount).toFixed(2)
+          ]),
+          doc.y,
+          [350, 150]
+        );
+
+        doc.moveDown(1);
+
+        // Totals
+        const totalsY = tableY + 20;
+        doc.font('Helvetica-Bold').fontSize(12);
+        
+        doc.text('Total Amount:', 350, totalsY);
+        doc.text(`Rs. ${totalAmount.toFixed(2)}`, 450, totalsY, { align: 'right', width: 100 });
+
+        doc.moveDown(2);
+
+        // Payment instructions
+        doc.fontSize(9)
+           .font('Helvetica')
+           .text('Payment can be made at the school office during working hours.', { align: 'center' })
+           .text('Please keep this voucher for your records.', { align: 'center' });
+
+        // Add footer
+        this.addFooter(doc);
+      }
+
+      doc.end();
+
+      return new Promise((resolve, reject) => {
+        stream.on('finish', () => resolve({ filepath, filename }));
+        stream.on('error', reject);
+      });
+    } catch (error) {
+      throw error;
+    }
+  }
 }
 
 module.exports = new PDFService();

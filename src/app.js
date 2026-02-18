@@ -20,6 +20,7 @@ const reportsRoutes = require('./routes/reports.routes');
 const analyticsRoutes = require('./routes/analytics.routes');
 const documentsRoutes = require('./routes/documents.routes');
 const discountsRoutes = require('./routes/discounts.routes');
+const studentFeeOverridesRoutes = require('./routes/student-fee-overrides.routes');
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use('/api/reports', reportsRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api', documentsRoutes);
 app.use('/api/discounts', discountsRoutes);
+app.use('/api/student-fee-overrides', studentFeeOverridesRoutes);
 
 // 404 handler
 app.use(notFoundHandler);
