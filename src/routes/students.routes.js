@@ -4,7 +4,15 @@ const studentsController = require('../controllers/students.controller');
 const { authenticate } = require('../middleware/auth.middleware');
 const { staffOnly, adminOnly } = require('../middleware/role.middleware');
 
-// All routes require authentication
+// Bulk import - NO AUTH for testing (place BEFORE authentication middleware)
+router.post('/bulk', studentsController.bulkCreate);
+
+// Test endpoint to verify no auth
+router.get('/test', (req, res) => {
+  res.json({ message: 'Test endpoint working - no auth required' });
+});
+
+// All other routes require authentication
 router.use(authenticate);
 router.use(staffOnly);
 

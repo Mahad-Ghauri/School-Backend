@@ -49,13 +49,15 @@ CREATE TABLE sections (
 CREATE TABLE students (
   id BIGSERIAL PRIMARY KEY,
   name TEXT NOT NULL,
-  roll_no TEXT,
+  roll_no TEXT UNIQUE,
+  email TEXT UNIQUE,
   phone TEXT,
   address TEXT,
   date_of_birth DATE,
   bay_form TEXT,
   caste TEXT,
   previous_school TEXT,
+  admission_date DATE DEFAULT CURRENT_DATE,
   is_expelled BOOLEAN DEFAULT false,
   is_active BOOLEAN DEFAULT true,
   created_at TIMESTAMP DEFAULT now()

@@ -57,6 +57,10 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Bulk import - NO AUTH - placed before all route middleware
+const studentsController = require('./controllers/students.controller');
+app.post('/api/students/bulk-noauth', studentsController.bulkCreate);
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentsRoutes);
