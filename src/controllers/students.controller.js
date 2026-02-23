@@ -1342,102 +1342,59 @@ class StudentsController {
       const targetSectionId = validatedStudents[0].section_id || 1;
 
       // Auto-generate unique roll numbers for all students
-      let rollNumberCounter = Date.now(); // Use timestamp for uniqueness
+      // Insert all students without validation - duplicates allowed
+      const insertedStudents = [];
 
-      // Generate unique roll numbers for all
-      validatedStudents.forEach((student, index) => {
+      for (let i = 0; i < validatedStudents.length; i++) {
+        const student = validatedStudents[i];
+        
+        // Auto-generate roll_no if not provided
         if (!student.roll_no) {
-          student.roll_no = `AUTO-${rollNumberCounter}-${index}`;
+          student.roll_no = `AUTO-${Date.now()}-${i}`;
         }
-      });
 
-      // Prepare bulk insert with only existing database fields
-      const values = [];
-      const placeholders = [];
-      let paramIndex = 1;
-
-      validatedStudents.forEach((student) => {
-        const studentValues = [
-          student.name,
-          student.roll_no,
-          student.phone,
-          student.address,
-          student.email,
-          student.date_of_birth,
-          student.bay_form,
-          student.caste,
-          student.previous_school
-        ];
-        
-        values.push(...studentValues);
-        const params = Array.from({ length: 9 }, (_, i) => `$${paramIndex + i}`).join(', ');
-        placeholders.push(`(${params})`);
-        paramIndex += 9;
-      });
-
-      // Insert students with existing database fields
-      const insertQuery = `
-        INSERT INTO students (
-          name, roll_no, phone, address, email,
-          date_of_birth, bay_form, caste, previous_school
-        )
-        VALUES ${placeholders.join(', ')}
-        RETURNING id, name, roll_no, email
-      `;
-
-      console.log('🔍 Executing student insert with query:', insertQuery.substring(0, 200) + '...')
-      console.log('🔍 First few values:', values.slice(0, 10))
-
-      const insertResult = await client.query(insertQuery, values);
-      const insertedStudents = insertResult.rows;
-
-      // Enroll ALL students in the specified section
-      const enrollmentValues = [];
-      const enrollmentPlaceholders = [];
-      paramIndex = 1;
-
-      for (let i = 0; i < insertedStudents.length; i++) {
-        const student = insertedStudents[i];
-        
-        // Enroll in the target class and section
-        enrollmentValues.push(
-          student.id,
-          targetClassId,
-          targetSectionId,
-          validatedStudents[i].admission_date || new Date()
+        const insertResult = await client.query(
+          `INSERT INTO students (
+            name, roll_no, phone, address, email,
+            date_of_birth, bay_form, caste, previous_school, is_bulk_imported
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, true)
+          RETURNING id, name, roll_no, email`,
+          [
+            student.name,
+            student.roll_no,
+            student.phone,
+            student.address,
+            student.email,
+            student.date_of_birth,
+            student.bay_form,
+            student.caste,
+            student.previous_school
+          ]
         );
-        enrollmentPlaceholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3})`);
-        paramIndex += 4;
+
+        const newStudent = insertResult.rows[0];
+        insertedStudents.push(newStudent);
+
+        // Enroll in the target class
+        await client.query(
+          `INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
+           VALUES ($1, $2, $3, $4)`,
+          [newStudent.id, targetClassId, targetSectionId, student.admission_date || new Date()]
+        );
       }
 
-      const enrollmentQuery = `
-        INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
-        VALUES ${enrollmentPlaceholders.join(', ')}
-      `;
-
-      await client.query(enrollmentQuery, enrollmentValues);
-
       await client.query('COMMIT');
-
+      
       return ApiResponse.success(res, {
         successCount: insertedStudents.length,
         students: insertedStudents,
         classId: targetClassId,
         sectionId: targetSectionId,
-        className: 'Default Class',
-        sectionName: 'Default Section',
         warnings: warnings.length > 0 ? warnings : undefined
-      }, `Successfully imported ${insertedStudents.length} student(s) without validation restrictions`);
+      }, `Successfully imported ${insertedStudents.length} student(s)`);
 
     } catch (error) {
       await client.query('ROLLBACK');
-      
-      if (error.code === '23505') {
-        // PostgreSQL unique constraint violation - make roll numbers unique and retry
-        console.log('🔄 Duplicate constraint hit, will auto-fix roll numbers');
-        // Don't return error, let it continue with warnings
-      }
-      
       console.error('Bulk import error:', error);
       next(error);
     } finally {

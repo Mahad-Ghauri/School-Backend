@@ -55,7 +55,7 @@ class VouchersController {
 
       // Check if student is currently enrolled
       const enrollmentCheck = await client.query(
-        `SELECT sch.id, sch.class_id, s.name as student_name, s.is_active
+        `SELECT sch.id, sch.class_id, s.name as student_name, s.is_active, s.is_bulk_imported
          FROM student_class_history sch
          JOIN students s ON sch.student_id = s.id
          WHERE sch.student_id = $1 AND sch.end_date IS NULL`,
@@ -71,6 +71,7 @@ class VouchersController {
       }
 
       const enrollment = enrollmentCheck.rows[0];
+      const isBulkImported = enrollment.is_bulk_imported || false;
 
       // Check for duplicate voucher for the same month
       const duplicateCheck = await client.query(
@@ -154,40 +155,53 @@ class VouchersController {
       // Build fee items based on fee_types parameter or smart logic
       let feeItems = [];
 
-      // 1. One-time fees (Admission)
-      if (fee_types && fee_types.length > 0) {
-        if (fee_types.includes('ADMISSION')) {
+      // For bulk imported students (CSV import): ONLY monthly fee, always
+      if (isBulkImported) {
+        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+      } else {
+        // Regular admission flow
+
+        // 1. One-time fees (Admission) - only for first enrollment
+        if (fee_types && fee_types.length > 0) {
+          if (fee_types.includes('ADMISSION')) {
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          // First voucher gets admission fee
           feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
         }
-      } else if (isFirstEnrollment) {
-        feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-      }
 
-      // 2. Promotion fee (if applicable)
-      const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-      if (isFirstEnrollment && promotionFee > 0) {
-        // Check if student has previous history to confirm this is a promotion
-        const historyCheck = await client.query(
-          `SELECT COUNT(*) as count FROM student_class_history 
-           WHERE student_id = $1 AND end_date IS NOT NULL`,
-          [student_id]
-        );
-        if (parseInt(historyCheck.rows[0].count) > 0) {
-          feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+        // 2. Promotion fee (if applicable)
+        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+        if (isFirstEnrollment && promotionFee > 0) {
+          // Check if student has previous history to confirm this is a promotion
+          const historyCheck = await client.query(
+            `SELECT COUNT(*) as count FROM student_class_history 
+             WHERE student_id = $1 AND end_date IS NOT NULL`,
+            [student_id]
+          );
+          if (parseInt(historyCheck.rows[0].count) > 0) {
+            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          }
         }
-      }
 
-      // 3. Recurring fees (Monthly, Paper Fund)
-      if (fee_types && fee_types.length > 0) {
-        if (fee_types.includes('MONTHLY')) {
+        // 3. Recurring fees
+        if (fee_types && fee_types.length > 0) {
+          // If specific fee types requested, use those
+          if (fee_types.includes('MONTHLY')) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          }
+          if (fee_types.includes('PAPER_FUND')) {
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          // First voucher (admission): include monthly AND paper fund
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+        } else {
+          // Subsequent vouchers: ONLY monthly fee
           feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
         }
-        if (fee_types.includes('PAPER_FUND')) {
-          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-        }
-      } else {
-        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-        feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
       }
 
       // 4. Arrears logic (Smart inclusion)
@@ -317,7 +331,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.is_bulk_imported
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -405,44 +419,58 @@ class VouchersController {
             [student.enrollment_id]
           );
           const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+          const isBulkImported = student.is_bulk_imported || false;
 
           // Build fee items for this student
           let feeItems = [];
 
-          // 1. One-time fees (Admission)
-          if (fee_types && fee_types.length > 0) {
-            if (fee_types.includes('ADMISSION')) {
+          // For bulk imported students (CSV import): ONLY monthly fee, always
+          if (isBulkImported) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          } else {
+            // Regular admission flow
+
+            // 1. One-time fees (Admission) - only for first enrollment
+            if (fee_types && fee_types.length > 0) {
+              if (fee_types.includes('ADMISSION')) {
+                feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+              }
+            } else if (isFirstEnrollment) {
+              // First voucher gets admission fee
               feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
             }
-          } else if (isFirstEnrollment) {
-            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-          }
 
-          // 2. Promotion fee (if applicable)
-          const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-          if (isFirstEnrollment && promotionFee > 0) {
-            // Check if student has previous history to confirm this is a promotion
-            const historyCheck = await client.query(
-              `SELECT COUNT(*) as count FROM student_class_history 
-               WHERE student_id = $1 AND end_date IS NOT NULL`,
-              [student.student_id]
-            );
-            if (parseInt(historyCheck.rows[0].count) > 0) {
-              feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+            // 2. Promotion fee (if applicable)
+            const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+            if (isFirstEnrollment && promotionFee > 0) {
+              // Check if student has previous history to confirm this is a promotion
+              const historyCheck = await client.query(
+                `SELECT COUNT(*) as count FROM student_class_history 
+                 WHERE student_id = $1 AND end_date IS NOT NULL`,
+                [student.student_id]
+              );
+              if (parseInt(historyCheck.rows[0].count) > 0) {
+                feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+              }
             }
-          }
 
-          // 3. Recurring fees (Monthly, Paper Fund)
-          if (fee_types && fee_types.length > 0) {
-            if (fee_types.includes('MONTHLY')) {
+            // 3. Recurring fees
+            if (fee_types && fee_types.length > 0) {
+              // If specific fee types requested, use those
+              if (fee_types.includes('MONTHLY')) {
+                feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+              }
+              if (fee_types.includes('PAPER_FUND')) {
+                feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+              }
+            } else if (isFirstEnrollment) {
+              // First voucher (admission): include monthly AND paper fund
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+            } else {
+              // Subsequent vouchers: ONLY monthly fee
               feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
             }
-            if (fee_types.includes('PAPER_FUND')) {
-              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-            }
-          } else {
-            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
           }
 
           // 4. Arrears logic (Smart inclusion)
@@ -1017,7 +1045,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, s.is_bulk_imported
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -1082,43 +1110,57 @@ class VouchersController {
           [student.enrollment_id]
         );
         const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+        const isBulkImported = student.is_bulk_imported || false;
 
         // Build fee items for this student
         let feeItems = [];
 
-        // 1. One-time fees (Admission)
-        if (fee_types && fee_types.length > 0) {
-          if (fee_types.includes('ADMISSION')) {
+        // For bulk imported students (CSV import): ONLY monthly fee, always
+        if (isBulkImported) {
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+        } else {
+          // Regular admission flow
+
+          // 1. One-time fees (Admission) - only for first enrollment
+          if (fee_types && fee_types.length > 0) {
+            if (fee_types.includes('ADMISSION')) {
+              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+            }
+          } else if (isFirstEnrollment) {
+            // First voucher gets admission fee
             feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
           }
-        } else if (isFirstEnrollment) {
-          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-        }
 
-        // 2. Promotion fee (if applicable)
-        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-        if (isFirstEnrollment && promotionFee > 0) {
-          const historyCheck = await client.query(
-            `SELECT COUNT(*) as count FROM student_class_history 
-             WHERE student_id = $1 AND end_date IS NOT NULL`,
-            [student.student_id]
-          );
-          if (parseInt(historyCheck.rows[0].count) > 0) {
-            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          // 2. Promotion fee (if applicable)
+          const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+          if (isFirstEnrollment && promotionFee > 0) {
+            const historyCheck = await client.query(
+              `SELECT COUNT(*) as count FROM student_class_history 
+               WHERE student_id = $1 AND end_date IS NOT NULL`,
+              [student.student_id]
+            );
+            if (parseInt(historyCheck.rows[0].count) > 0) {
+              feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+            }
           }
-        }
 
-        // 3. Recurring fees (Monthly, Paper Fund)
-        if (fee_types && fee_types.length > 0) {
-          if (fee_types.includes('MONTHLY')) {
+          // 3. Recurring fees
+          if (fee_types && fee_types.length > 0) {
+            // If specific fee types requested, use those
+            if (fee_types.includes('MONTHLY')) {
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+            }
+            if (fee_types.includes('PAPER_FUND')) {
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+            }
+          } else if (isFirstEnrollment) {
+            // First voucher (admission): include monthly AND paper fund
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          } else {
+            // Subsequent vouchers: ONLY monthly fee
             feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
           }
-          if (fee_types.includes('PAPER_FUND')) {
-            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-          }
-        } else {
-          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
         }
 
         // 4. Arrears logic

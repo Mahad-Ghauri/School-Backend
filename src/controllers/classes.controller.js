@@ -383,11 +383,13 @@ class ClassesController {
   /**
    * Delete class (soft delete by deactivating)
    * DELETE /api/classes/:id
+   * Query params: force=true to delete class with students (will end their class assignments)
    */
   async delete(req, res, next) {
     const client = await pool.connect();
     try {
       const { id } = req.params;
+      const { force } = req.query;
 
       // Check if class has students
       const studentsCheck = await client.query(
@@ -397,11 +399,26 @@ class ClassesController {
         [id]
       );
 
-      if (parseInt(studentsCheck.rows[0].count) > 0) {
+      const studentCount = parseInt(studentsCheck.rows[0].count);
+
+      if (studentCount > 0 && force !== 'true') {
         return ApiResponse.error(
           res,
-          'Cannot delete class with active students. Please deactivate instead.',
-          400
+          `Cannot delete class with ${studentCount} active student(s). Use force=true to delete anyway.`,
+          400,
+          { studentCount }
+        );
+      }
+
+      await client.query('BEGIN');
+
+      // If force delete, end all student class assignments for this class
+      if (studentCount > 0 && force === 'true') {
+        await client.query(
+          `UPDATE student_class_history 
+           SET end_date = CURRENT_DATE 
+           WHERE class_id = $1 AND end_date IS NULL`,
+          [id]
         );
       }
 
@@ -412,11 +429,19 @@ class ClassesController {
       );
 
       if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Class not found', 404);
       }
 
-      return ApiResponse.success(res, result.rows[0], 'Class deactivated successfully');
+      await client.query('COMMIT');
+
+      const message = studentCount > 0 
+        ? `Class deactivated successfully. ${studentCount} student(s) were removed from this class.`
+        : 'Class deactivated successfully';
+
+      return ApiResponse.success(res, result.rows[0], message);
     } catch (error) {
+      await client.query('ROLLBACK');
       next(error);
     } finally {
       client.release();
