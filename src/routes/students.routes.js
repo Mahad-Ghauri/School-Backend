@@ -7,6 +7,9 @@ const { staffOnly, adminOnly } = require('../middleware/role.middleware');
 // Bulk import - NO AUTH for testing (place BEFORE authentication middleware)
 router.post('/bulk', studentsController.bulkCreate);
 
+// Bulk operations - NO AUTH for testing
+router.post('/bulk-deactivate', studentsController.bulkDeactivate);
+
 // Test endpoint to verify no auth
 router.get('/test', (req, res) => {
   res.json({ message: 'Test endpoint working - no auth required' });

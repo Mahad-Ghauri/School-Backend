@@ -25,6 +25,7 @@ class StudentsController {
     this.transfer = this.transfer.bind(this);
     this.promote = this.promote.bind(this);
     this.bulkCreate = this.bulkCreate.bind(this);
+    this.bulkDeactivate = this.bulkDeactivate.bind(this);
   }
 
   /**
@@ -1173,9 +1174,9 @@ class StudentsController {
    * Bulk create students with flexible field support
    * POST /api/students/bulk
    * 
-   * Accepts any CSV fields and gracefully handles missing data.
-   * Required fields: at least firstName OR name, classId, sectionId
-   * All other fields are optional and will be set to NULL if missing
+   * Accepts CSV with 3 header rows (automatically skipped by frontend)
+   * Core Required fields: Name, Father Name
+   * Optional fields: Sr No, Contact No, Fee, and any other custom fields
    */
   async bulkCreate(req, res, next) {
     const client = await pool.connect();
@@ -1211,39 +1212,32 @@ class StudentsController {
         return ApiResponse.error(res, 'Too many students: maximum 1000 allowed per batch', 400);
       }
 
-      // Minimal validation - accept almost anything
+      // Flexible validation - accept CSV format with new core fields
       const schema = Joi.object({
-        // Name fields - at least one should exist, but we'll handle it flexibly
+        // Core fields from CSV
+        srNo: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        name: Joi.string().required(), // Required
+        fatherName: Joi.string().required(), // Required
+        contactNo: Joi.string().optional().allow('', null),
+        fee: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        
+        // System fields
+        classId: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        sectionId: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        
+        // Legacy/optional fields for compatibility
         firstName: Joi.string().optional().allow('', null),
         lastName: Joi.string().optional().allow('', null),
-        name: Joi.string().optional().allow('', null),
-        
-        // Contact fields - all optional, no format validation
         email: Joi.string().optional().allow('', null),
         phone: Joi.string().optional().allow('', null),
-        
-        // Identifier - completely optional
         rollNumber: Joi.string().optional().allow('', null),
-        
-        // Class assignment - required for bulk import
-        classId: Joi.number().optional().allow('', null),
-        sectionId: Joi.number().optional().allow('', null),
-        
-        // All other fields optional
         address: Joi.string().optional().allow('', null),
-        fatherName: Joi.string().optional().allow('', null),
-        motherName: Joi.string().optional().allow('', null),
-        guardianName: Joi.string().optional().allow('', null),
-        guardianPhone: Joi.string().optional().allow('', null),
         dateOfBirth: Joi.alternatives().try(Joi.date(), Joi.string()).optional().allow('', null),
-        gender: Joi.string().optional().allow('', null),
-        bloodGroup: Joi.string().optional().allow('', null),
-        religion: Joi.string().optional().allow('', null),
-        caste: Joi.string().optional().allow('', null),
-        nationality: Joi.string().optional().allow('', null),
-        admissionDate: Joi.alternatives().try(Joi.date(), Joi.string()).optional().allow('', null),
-        previousSchool: Joi.string().optional().allow('', null),
-        bayForm: Joi.string().optional().allow('', null),
+        
+        // Raw data and other fields
+        otherFields: Joi.string().optional().allow('', null),
+        _rawData: Joi.object().optional().unknown(true),
+        id: Joi.number().optional(), // Internal ID for grid
         
         // Allow any additional fields without validation
       }).unknown(true);
@@ -1264,62 +1258,74 @@ class StudentsController {
           continue;
         }
 
-        // Build name from available fields - be extremely flexible
+        // Build student name - REQUIRED
         let studentName = value.name || '';
         if (!studentName && (value.firstName || value.lastName)) {
           studentName = `${value.firstName || ''} ${value.lastName || ''}`.trim();
         }
         
-        // If still no name, create a placeholder
         if (!studentName) {
-          studentName = `Student ${i + 1}`;
-          warnings.push({
+          errors.push({
             row: i + 1,
-            message: 'No name provided, using placeholder name'
+            errors: ['Name is required']
           });
+          continue;
+        }
+
+        // Father name - REQUIRED
+        const fatherName = value.fatherName || '';
+        if (!fatherName) {
+          errors.push({
+            row: i + 1,
+            errors: ['Father Name is required']
+          });
+          continue;
         }
 
         // Use provided class/section or defaults
-        const classId = value.classId || 1; // Default class
-        const sectionId = value.sectionId || 1; // Default section
+        const classId = parseInt(value.classId) || 1; // Default class
+        const sectionId = parseInt(value.sectionId) || 1; // Default section
 
-        // Generate roll number if missing
-        let rollNo = value.rollNumber || null;
+        // Generate roll number from Sr No or auto-generate
+        let rollNo = value.rollNumber || value.srNo || null;
         if (!rollNo) {
-          rollNo = `AUTO-${Date.now()}-${i}`; // Simple auto-generation
+          rollNo = `STD-${Date.now()}-${i}`; // Auto-generation
           warnings.push({
             row: i + 1,
-            message: 'Roll number auto-generated'
+            message: 'Roll number auto-generated from Sr No'
           });
         }
 
-        // Prepare student data with NULL for missing fields
-        // Only use fields that exist in the database schema
-        const additionalFields = {};
-        Object.keys(value).forEach(key => {
-          if (![
-            'firstName', 'lastName', 'name',  'email', 'phone', 'rollNumber',
-            'address', 'classId', 'sectionId', 'dateOfBirth', 'bayForm',
-            'caste', 'previousSchool'
-          ].includes(key)) {
-            additionalFields[key] = value[key];
+        // Extract phone from contactNo or phone field
+        const phone = value.contactNo || value.phone || null;
+
+        // Parse raw data for additional fields
+        let additionalFields = {};
+        if (value._rawData) {
+          additionalFields = { ...value._rawData };
+        }
+        if (value.otherFields) {
+          try {
+            const parsed = JSON.parse(value.otherFields);
+            additionalFields = { ...additionalFields, ...parsed };
+          } catch (e) {
+            // Ignore parse errors
           }
-        });
+        }
 
         validatedStudents.push({
           name: studentName,
-          roll_no: rollNo,
+          father_name: fatherName,
+          roll_no: String(rollNo),
+          phone: phone,
           email: value.email || null,
-          phone: value.phone || null,
           address: value.address || null,
           class_id: classId,
           section_id: sectionId,
           date_of_birth: value.dateOfBirth || null,
-          bay_form: value.bayForm || null,
-          caste: value.caste || null,
-          previous_school: value.previousSchool || null,
+          fee: value.fee || null,
           admission_date: value.admissionDate || new Date(),
-          // Store any additional unknown fields as JSON for future use
+          // Store any additional fields as JSON
           additional_info: Object.keys(additionalFields).length > 0 
             ? JSON.stringify(additionalFields) 
             : null
@@ -1342,103 +1348,108 @@ class StudentsController {
       const targetSectionId = validatedStudents[0].section_id || 1;
 
       // Auto-generate unique roll numbers for all students
-      let rollNumberCounter = Date.now(); // Use timestamp for uniqueness
+      // Insert all students without validation - duplicates allowed
+      const insertedStudents = [];
 
-      // Generate unique roll numbers for all
-      validatedStudents.forEach((student, index) => {
+      for (let i = 0; i < validatedStudents.length; i++) {
+        const student = validatedStudents[i];
+        
+        // Auto-generate roll_no if not provided
         if (!student.roll_no) {
-          student.roll_no = `AUTO-${rollNumberCounter}-${index}`;
+          student.roll_no = `AUTO-${Date.now()}-${i}`;
         }
-      });
 
-      // Prepare bulk insert with only existing database fields
-      const values = [];
-      const placeholders = [];
-      let paramIndex = 1;
-
-      validatedStudents.forEach((student) => {
-        const studentValues = [
-          student.name,
-          student.roll_no,
-          student.phone,
-          student.address,
-          student.email,
-          student.date_of_birth,
-          student.bay_form,
-          student.caste,
-          student.previous_school
-        ];
-        
-        values.push(...studentValues);
-        const params = Array.from({ length: 9 }, (_, i) => `$${paramIndex + i}`).join(', ');
-        placeholders.push(`(${params})`);
-        paramIndex += 9;
-      });
-
-      // Insert students with existing database fields
-      const insertQuery = `
-        INSERT INTO students (
-          name, roll_no, phone, address, email,
-          date_of_birth, bay_form, caste, previous_school
-        )
-        VALUES ${placeholders.join(', ')}
-        RETURNING id, name, roll_no, email
-      `;
-
-      console.log('🔍 Executing student insert with query:', insertQuery.substring(0, 200) + '...')
-      console.log('🔍 First few values:', values.slice(0, 10))
-
-      const insertResult = await client.query(insertQuery, values);
-      const insertedStudents = insertResult.rows;
-
-      // Enroll ALL students in the specified section
-      const enrollmentValues = [];
-      const enrollmentPlaceholders = [];
-      paramIndex = 1;
-
-      for (let i = 0; i < insertedStudents.length; i++) {
-        const student = insertedStudents[i];
-        
-        // Enroll in the target class and section
-        enrollmentValues.push(
-          student.id,
-          targetClassId,
-          targetSectionId,
-          validatedStudents[i].admission_date || new Date()
+        const insertResult = await client.query(
+          `INSERT INTO students (
+            name, roll_no, phone, address, email, father_name,
+            date_of_birth, bay_form, caste, previous_school, is_bulk_imported
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
+          RETURNING id, name, roll_no, email, father_name`,
+          [
+            student.name,
+            student.roll_no,
+            student.phone,
+            student.address,
+            student.email,
+            student.father_name,
+            student.date_of_birth,
+            student.bay_form,
+            student.caste,
+            student.previous_school
+          ]
         );
-        enrollmentPlaceholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3})`);
-        paramIndex += 4;
+
+        const newStudent = insertResult.rows[0];
+        insertedStudents.push(newStudent);
+
+        // Enroll in the target class
+        await client.query(
+          `INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
+           VALUES ($1, $2, $3, $4)`,
+          [newStudent.id, targetClassId, targetSectionId, student.admission_date || new Date()]
+        );
       }
 
-      const enrollmentQuery = `
-        INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
-        VALUES ${enrollmentPlaceholders.join(', ')}
-      `;
-
-      await client.query(enrollmentQuery, enrollmentValues);
-
       await client.query('COMMIT');
-
+      
       return ApiResponse.success(res, {
         successCount: insertedStudents.length,
         students: insertedStudents,
         classId: targetClassId,
         sectionId: targetSectionId,
-        className: 'Default Class',
-        sectionName: 'Default Section',
         warnings: warnings.length > 0 ? warnings : undefined
-      }, `Successfully imported ${insertedStudents.length} student(s) without validation restrictions`);
+      }, `Successfully imported ${insertedStudents.length} student(s)`);
 
     } catch (error) {
       await client.query('ROLLBACK');
-      
-      if (error.code === '23505') {
-        // PostgreSQL unique constraint violation - make roll numbers unique and retry
-        console.log('🔄 Duplicate constraint hit, will auto-fix roll numbers');
-        // Don't return error, let it continue with warnings
-      }
-      
       console.error('Bulk import error:', error);
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Bulk deactivate all students (clear admission list)
+   * POST /api/students/bulk-deactivate
+   */
+  async bulkDeactivate(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Get count of currently active students
+      const countResult = await client.query(
+        'SELECT COUNT(*) as count FROM students WHERE is_active = true'
+      );
+      const activeCount = parseInt(countResult.rows[0].count);
+
+      if (activeCount === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.success(res, {
+          deactivatedCount: 0,
+          message: 'No active students found to deactivate'
+        }, 'No students were deactivated');
+      }
+
+      // Deactivate all active students
+      const result = await client.query(
+        `UPDATE students 
+         SET is_active = false
+         WHERE is_active = true 
+         RETURNING id, name`
+      );
+
+      await client.query('COMMIT');
+
+      return ApiResponse.success(res, {
+        deactivatedCount: result.rows.length,
+        deactivatedStudents: result.rows
+      }, `Successfully deactivated ${result.rows.length} student(s) from admission list`);
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Bulk deactivate error:', error);
       next(error);
     } finally {
       client.release();
