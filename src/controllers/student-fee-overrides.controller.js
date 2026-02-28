@@ -23,7 +23,7 @@ class StudentFeeOverridesController {
     try {
       await client.query('BEGIN');
 
-      const { student_id, class_id, admission_fee, monthly_fee, paper_fund, reason } = req.body;
+      const { student_id, class_id, admission_fee, monthly_fee, paper_fund, reason, discount_description } = req.body;
 
       // Validate input
       const schema = Joi.object({
@@ -32,7 +32,8 @@ class StudentFeeOverridesController {
         admission_fee: Joi.number().allow(null).optional(),
         monthly_fee: Joi.number().allow(null).optional(),
         paper_fund: Joi.number().allow(null).optional(),
-        reason: Joi.string().optional().allow('', null)
+        reason: Joi.string().optional().allow('', null),
+        discount_description: Joi.string().optional().allow('', null)
       });
 
       const { error } = schema.validate(req.body);
@@ -71,14 +72,15 @@ class StudentFeeOverridesController {
         // Update existing override
         result = await client.query(
           `UPDATE student_fee_overrides 
-           SET admission_fee = $1, monthly_fee = $2, paper_fund = $3, reason = $4, applied_by = $5
-           WHERE student_id = $6 AND class_id = $7
+           SET admission_fee = $1, monthly_fee = $2, paper_fund = $3, reason = $4, discount_description = $5, applied_by = $6
+           WHERE student_id = $7 AND class_id = $8
            RETURNING *`,
           [
             admission_fee,
             monthly_fee,
             paper_fund,
             reason || null,
+            discount_description || null,
             req.user.id,
             student_id,
             class_id
@@ -88,10 +90,10 @@ class StudentFeeOverridesController {
         // Create new override
         result = await client.query(
           `INSERT INTO student_fee_overrides 
-           (student_id, class_id, admission_fee, monthly_fee, paper_fund, reason, applied_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           (student_id, class_id, admission_fee, monthly_fee, paper_fund, reason, discount_description, applied_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING *`,
-          [student_id, class_id, admission_fee, monthly_fee, paper_fund, reason || null, req.user.id]
+          [student_id, class_id, admission_fee, monthly_fee, paper_fund, reason || null, discount_description || null, req.user.id]
         );
       }
 

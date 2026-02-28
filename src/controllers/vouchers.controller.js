@@ -19,6 +19,7 @@ class VouchersController {
     this.delete = this.delete.bind(this);
     this.downloadPDF = this.downloadPDF.bind(this);
     this.printPDF = this.printPDF.bind(this);
+    this.bulkPrintPDF = this.bulkPrintPDF.bind(this);
   }
 
   /**
@@ -55,7 +56,7 @@ class VouchersController {
 
       // Check if student is currently enrolled
       const enrollmentCheck = await client.query(
-        `SELECT sch.id, sch.class_id, s.name as student_name, s.is_active
+        `SELECT sch.id, sch.class_id, s.name as student_name, s.is_active, s.is_bulk_imported, s.is_fee_free
          FROM student_class_history sch
          JOIN students s ON sch.student_id = s.id
          WHERE sch.student_id = $1 AND sch.end_date IS NULL`,
@@ -71,22 +72,34 @@ class VouchersController {
       }
 
       const enrollment = enrollmentCheck.rows[0];
+      const isBulkImported = enrollment.is_bulk_imported || false;
 
-      // Check for duplicate voucher for the same month
-      const duplicateCheck = await client.query(
-        `SELECT id FROM fee_vouchers 
-         WHERE student_class_history_id = $1 
-         AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-        [enrollment.id, month]
-      );
-
-      if (duplicateCheck.rows.length > 0) {
+      // Check if student is fee-free
+      if (enrollment.is_fee_free) {
+        console.log(`Student ${enrollment.student_name} is marked as fee-free. Skipping voucher generation.`);
         return ApiResponse.error(
           res,
-          `Voucher already exists for ${enrollment.student_name} for the specified month`,
+          `Student ${enrollment.student_name} is marked as fee-free. No voucher will be generated.`,
           400
         );
       }
+
+      // Duplicate voucher check removed - allowing multiple vouchers per month
+      // const duplicateCheck = await client.query(
+      //   `SELECT id, month FROM fee_vouchers 
+      //    WHERE student_class_history_id = $1 
+      //    AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
+      //   [enrollment.id, month]
+      // );
+      //
+      // if (duplicateCheck.rows.length > 0) {
+      //   console.log(`Duplicate voucher check failed for enrollment ${enrollment.id}: Existing voucher ${duplicateCheck.rows[0].id} for month ${duplicateCheck.rows[0].month}`);
+      //   return ApiResponse.error(
+      //     res,
+      //     `Voucher already exists for ${enrollment.student_name} for the specified month`,
+      //     400
+      //   );
+      // }
 
       // Get current fee structure for the class
       const feeStructure = await client.query(
@@ -104,27 +117,49 @@ class VouchersController {
 
       const fees = feeStructure.rows[0];
 
+      // Check for individual monthly fee from CSV import
+      const studentFeeResult = await client.query(
+        `SELECT individual_monthly_fee FROM students WHERE id = $1`,
+        [student_id]
+      );
+      const individualMonthlyFee = studentFeeResult.rows[0]?.individual_monthly_fee;
+
       // Check for student-specific fee overrides
       const feeOverrideResult = await client.query(
-        `SELECT admission_fee, monthly_fee, paper_fund 
+        `SELECT admission_fee, monthly_fee, paper_fund, discount_description 
          FROM student_fee_overrides
          WHERE student_id = $1 AND class_id = $2`,
         [student_id, enrollment.class_id]
       );
 
-      // Use override fees if they exist, otherwise use class defaults
+      // Use fees in priority order: individual_monthly_fee > fee_override > class_default
       const effectiveFees = {
         admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
           ? feeOverrideResult.rows[0].admission_fee
           : fees.admission_fee,
-        monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
-          ? feeOverrideResult.rows[0].monthly_fee
-          : fees.monthly_fee,
+        monthly_fee: individualMonthlyFee !== null && individualMonthlyFee !== undefined
+          ? individualMonthlyFee
+          : (feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+            ? feeOverrideResult.rows[0].monthly_fee
+            : fees.monthly_fee),
         paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
           ? feeOverrideResult.rows[0].paper_fund
           : fees.paper_fund,
         promotion_fee: fees.promotion_fee // Promotion fee is not overridable
       };
+
+      // Log fee calculation for debugging
+      console.log(`[Single Voucher] Student ${enrollment.student_name} (${student_id})`);
+      console.log(`  - individual_monthly_fee: ${individualMonthlyFee} (type: ${typeof individualMonthlyFee})`);
+      console.log(`  - class_monthly_fee: ${fees.monthly_fee}`);
+      console.log(`  - fee_override: ${feeOverrideResult.rows.length > 0 ? feeOverrideResult.rows[0].monthly_fee : 'none'}`);
+      console.log(`  - effective_monthly_fee: ${effectiveFees.monthly_fee}`);
+      console.log(`  - condition check: null=${individualMonthlyFee !== null}, undefined=${individualMonthlyFee !== undefined}`);
+
+      // Get discount description if available
+      const discountDescription = feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].discount_description
+        ? feeOverrideResult.rows[0].discount_description
+        : null;
 
       // Determine if this is the first voucher for this class enrollment
       // Check BEFORE creating the voucher
@@ -141,12 +176,12 @@ class VouchersController {
         return new Date(voucherMonth.getFullYear(), voucherMonth.getMonth(), 10);
       })();
 
-      // Create voucher with due date
+      // Create voucher with due date and discount description
       const voucherResult = await client.query(
-        `INSERT INTO fee_vouchers (student_class_history_id, month, due_date)
-         VALUES ($1, $2, $3)
+        `INSERT INTO fee_vouchers (student_class_history_id, month, due_date, discount_description)
+         VALUES ($1, $2, $3, $4)
          RETURNING *`,
-        [enrollment.id, month, calculatedDueDate]
+        [enrollment.id, month, calculatedDueDate, discountDescription]
       );
 
       const voucher = voucherResult.rows[0];
@@ -154,40 +189,53 @@ class VouchersController {
       // Build fee items based on fee_types parameter or smart logic
       let feeItems = [];
 
-      // 1. One-time fees (Admission)
-      if (fee_types && fee_types.length > 0) {
-        if (fee_types.includes('ADMISSION')) {
+      // For bulk imported students (CSV import): ONLY monthly fee, always
+      if (isBulkImported) {
+        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+      } else {
+        // Regular admission flow
+
+        // 1. One-time fees (Admission) - only for first enrollment
+        if (fee_types && fee_types.length > 0) {
+          if (fee_types.includes('ADMISSION')) {
+            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          // First voucher gets admission fee
           feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
         }
-      } else if (isFirstEnrollment) {
-        feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-      }
 
-      // 2. Promotion fee (if applicable)
-      const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-      if (isFirstEnrollment && promotionFee > 0) {
-        // Check if student has previous history to confirm this is a promotion
-        const historyCheck = await client.query(
-          `SELECT COUNT(*) as count FROM student_class_history 
-           WHERE student_id = $1 AND end_date IS NOT NULL`,
-          [student_id]
-        );
-        if (parseInt(historyCheck.rows[0].count) > 0) {
-          feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+        // 2. Promotion fee (if applicable)
+        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+        if (isFirstEnrollment && promotionFee > 0) {
+          // Check if student has previous history to confirm this is a promotion
+          const historyCheck = await client.query(
+            `SELECT COUNT(*) as count FROM student_class_history 
+             WHERE student_id = $1 AND end_date IS NOT NULL`,
+            [student_id]
+          );
+          if (parseInt(historyCheck.rows[0].count) > 0) {
+            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          }
         }
-      }
 
-      // 3. Recurring fees (Monthly, Paper Fund)
-      if (fee_types && fee_types.length > 0) {
-        if (fee_types.includes('MONTHLY')) {
+        // 3. Recurring fees
+        if (fee_types && fee_types.length > 0) {
+          // If specific fee types requested, use those
+          if (fee_types.includes('MONTHLY')) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          }
+          if (fee_types.includes('PAPER_FUND')) {
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          }
+        } else if (isFirstEnrollment) {
+          // First voucher (admission): include monthly AND paper fund
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+        } else {
+          // Subsequent vouchers: ONLY monthly fee
           feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
         }
-        if (fee_types.includes('PAPER_FUND')) {
-          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-        }
-      } else {
-        feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-        feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
       }
 
       // 4. Arrears logic (Smart inclusion)
@@ -281,7 +329,7 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { class_id, section_id, month, fee_types, due_date } = req.body;
+      const { class_id, section_id, month, fee_types, due_date, custom_charges } = req.body;
 
       // Validate input
       const schema = Joi.object({
@@ -291,6 +339,12 @@ class VouchersController {
         due_date: Joi.date().optional(),
         fee_types: Joi.array().items(
           Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional(),
+        custom_charges: Joi.array().items(
+          Joi.object({
+            description: Joi.string().required(),
+            amount: Joi.number().required()
+          })
         ).optional()
       });
 
@@ -315,14 +369,15 @@ class VouchersController {
 
       const fees = feeStructure.rows[0];
 
-      // Get all enrolled students in class/section
+      // Get all enrolled students in class/section (exclude fee-free students)
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.is_bulk_imported, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
         AND sch.end_date IS NULL
         AND s.is_active = true
+        AND (s.is_fee_free IS NULL OR s.is_fee_free = false)
       `;
 
       const params = [class_id];
@@ -358,22 +413,26 @@ class VouchersController {
       // Generate voucher for each student
       for (const student of students.rows) {
         try {
-          // Check for duplicate
-          const duplicateCheck = await client.query(
-            `SELECT id FROM fee_vouchers 
-             WHERE student_class_history_id = $1 
-             AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-            [student.enrollment_id, month]
-          );
+          // Duplicate voucher check removed - allowing multiple vouchers per month
+          // const duplicateCheck = await client.query(
+          //   `SELECT id, month FROM fee_vouchers 
+          //    WHERE student_class_history_id = $1 
+          //    AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
+          //   [student.enrollment_id, month]
+          // );
+          //
+          // if (duplicateCheck.rows.length > 0) {
+          //   console.log(`Skipping student ${student.student_name} (${student.student_id}): Voucher ${duplicateCheck.rows[0].id} already exists for month ${duplicateCheck.rows[0].month}`);
+          //   results.skipped.push({
+          //     student_id: student.student_id,
+          //     student_name: student.student_name,
+          //     reason: 'Voucher already exists for this month'
+          //   });
+          //   continue;
+          // }
 
-          if (duplicateCheck.rows.length > 0) {
-            results.skipped.push({
-              student_id: student.student_id,
-              student_name: student.student_name,
-              reason: 'Voucher already exists for this month'
-            });
-            continue;
-          }
+          // Get individual monthly fee (already fetched in main query)
+          const individualMonthlyFee = student.individual_monthly_fee;
 
           // Check for student-specific fee overrides
           const feeOverrideResult = await client.query(
@@ -383,19 +442,28 @@ class VouchersController {
             [student.student_id, class_id]
           );
 
-          // Use override fees if they exist, otherwise use class defaults
+          // Use fees in priority order: individual_monthly_fee > fee_override > class_default
           const effectiveFees = {
             admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
               ? feeOverrideResult.rows[0].admission_fee
               : fees.admission_fee,
-            monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
-              ? feeOverrideResult.rows[0].monthly_fee
-              : fees.monthly_fee,
+            monthly_fee: individualMonthlyFee !== null && individualMonthlyFee !== undefined
+              ? individualMonthlyFee
+              : (feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+                ? feeOverrideResult.rows[0].monthly_fee
+                : fees.monthly_fee),
             paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
               ? feeOverrideResult.rows[0].paper_fund
               : fees.paper_fund,
             promotion_fee: fees.promotion_fee
           };
+
+          // Log fee calculation for debugging
+          console.log(`[Bulk] Student ${student.student_name} (${student.student_id})`);
+          console.log(`  - individual_monthly_fee from DB: ${student.individual_monthly_fee} (type: ${typeof student.individual_monthly_fee})`);
+          console.log(`  - assigned individualMonthlyFee: ${individualMonthlyFee} (type: ${typeof individualMonthlyFee})`);
+          console.log(`  - class_monthly_fee: ${fees.monthly_fee}`);
+          console.log(`  - effective_monthly_fee: ${effectiveFees.monthly_fee}`);
 
           // Determine if this is the first voucher for this class enrollment
           const isFirstVoucherForClass = await client.query(
@@ -405,44 +473,58 @@ class VouchersController {
             [student.enrollment_id]
           );
           const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+          const isBulkImported = student.is_bulk_imported || false;
 
           // Build fee items for this student
           let feeItems = [];
 
-          // 1. One-time fees (Admission)
-          if (fee_types && fee_types.length > 0) {
-            if (fee_types.includes('ADMISSION')) {
+          // For bulk imported students (CSV import): ONLY monthly fee, always
+          if (isBulkImported) {
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+          } else {
+            // Regular admission flow
+
+            // 1. One-time fees (Admission) - only for first enrollment
+            if (fee_types && fee_types.length > 0) {
+              if (fee_types.includes('ADMISSION')) {
+                feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+              }
+            } else if (isFirstEnrollment) {
+              // First voucher gets admission fee
               feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
             }
-          } else if (isFirstEnrollment) {
-            feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-          }
 
-          // 2. Promotion fee (if applicable)
-          const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-          if (isFirstEnrollment && promotionFee > 0) {
-            // Check if student has previous history to confirm this is a promotion
-            const historyCheck = await client.query(
-              `SELECT COUNT(*) as count FROM student_class_history 
-               WHERE student_id = $1 AND end_date IS NOT NULL`,
-              [student.student_id]
-            );
-            if (parseInt(historyCheck.rows[0].count) > 0) {
-              feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+            // 2. Promotion fee (if applicable)
+            const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+            if (isFirstEnrollment && promotionFee > 0) {
+              // Check if student has previous history to confirm this is a promotion
+              const historyCheck = await client.query(
+                `SELECT COUNT(*) as count FROM student_class_history 
+                 WHERE student_id = $1 AND end_date IS NOT NULL`,
+                [student.student_id]
+              );
+              if (parseInt(historyCheck.rows[0].count) > 0) {
+                feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+              }
             }
-          }
 
-          // 3. Recurring fees (Monthly, Paper Fund)
-          if (fee_types && fee_types.length > 0) {
-            if (fee_types.includes('MONTHLY')) {
+            // 3. Recurring fees
+            if (fee_types && fee_types.length > 0) {
+              // If specific fee types requested, use those
+              if (fee_types.includes('MONTHLY')) {
+                feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+              }
+              if (fee_types.includes('PAPER_FUND')) {
+                feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+              }
+            } else if (isFirstEnrollment) {
+              // First voucher (admission): include monthly AND paper fund
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+            } else {
+              // Subsequent vouchers: ONLY monthly fee
               feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
             }
-            if (fee_types.includes('PAPER_FUND')) {
-              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-            }
-          } else {
-            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
           }
 
           // 4. Arrears logic (Smart inclusion)
@@ -464,6 +546,19 @@ class VouchersController {
             feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
           }
 
+          // 5. Add custom charges if provided
+          if (custom_charges && Array.isArray(custom_charges) && custom_charges.length > 0) {
+            for (const charge of custom_charges) {
+              if (charge.description && charge.amount && parseFloat(charge.amount) > 0) {
+                feeItems.push({ 
+                  item_type: 'CUSTOM', 
+                  amount: parseFloat(charge.amount),
+                  description: charge.description 
+                });
+              }
+            }
+          }
+
           // Create voucher with due date
           const voucherResult = await client.query(
             `INSERT INTO fee_vouchers (student_class_history_id, month, due_date)
@@ -477,11 +572,21 @@ class VouchersController {
           // Insert fee items
           for (const item of feeItems) {
             if (item.amount !== 0) {
-              await client.query(
-                `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
-                 VALUES ($1, $2, $3)`,
-                [voucher.id, item.item_type, item.amount]
-              );
+              if (item.description) {
+                // Insert with description for CUSTOM items
+                await client.query(
+                  `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+                   VALUES ($1, $2, $3, $4)`,
+                  [voucher.id, item.item_type, item.amount, item.description]
+                );
+              } else {
+                // Insert without description for standard items
+                await client.query(
+                  `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+                   VALUES ($1, $2, $3)`,
+                  [voucher.id, item.item_type, item.amount]
+                );
+              }
             }
           }
 
@@ -674,7 +779,7 @@ class VouchersController {
       const total = parseInt(countResult.rows[0].count);
 
       // Add pagination
-      query += ` ORDER BY v.month DESC, s.name`;
+      query += ` ORDER BY s.roll_no, v.month DESC`;
       query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
       params.push(limit, (page - 1) * limit);
 
@@ -881,13 +986,7 @@ class VouchersController {
         );
       }
 
-      // Delete voucher items first
-      await client.query(
-        'DELETE FROM fee_voucher_items WHERE voucher_id = $1',
-        [id]
-      );
-
-      // Delete voucher
+      // Delete voucher (items will cascade delete automatically)
       const result = await client.query(
         'DELETE FROM fee_vouchers WHERE id = $1 RETURNING *',
         [id]
@@ -898,6 +997,8 @@ class VouchersController {
       }
 
       await client.query('COMMIT');
+
+      console.log(`Voucher ${id} deleted successfully for student_class_history_id: ${result.rows[0].student_class_history_id}, month: ${result.rows[0].month}`);
 
       return ApiResponse.success(res, result.rows[0], 'Voucher deleted successfully');
     } catch (error) {
@@ -981,7 +1082,7 @@ class VouchersController {
   async previewBulk(req, res, next) {
     const client = await pool.connect();
     try {
-      const { class_id, section_id, month, fee_types, due_date } = req.body;
+      const { class_id, section_id, month, fee_types, due_date, custom_charges } = req.body;
 
       // Validate input
       const schema = Joi.object({
@@ -991,6 +1092,12 @@ class VouchersController {
         due_date: Joi.date().optional(),
         fee_types: Joi.array().items(
           Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
+        ).optional(),
+        custom_charges: Joi.array().items(
+          Joi.object({
+            description: Joi.string().required(),
+            amount: Joi.number().required()
+          })
         ).optional()
       });
 
@@ -1015,14 +1122,15 @@ class VouchersController {
 
       const fees = feeStructure.rows[0];
 
-      // Get all enrolled students in class/section
+      // Get all enrolled students in class/section (exclude fee-free students)
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, s.is_bulk_imported, s.father_name, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
         AND sch.end_date IS NULL
         AND s.is_active = true
+        AND (s.is_fee_free IS NULL OR s.is_fee_free = false)
       `;
 
       const params = [class_id];
@@ -1030,6 +1138,8 @@ class VouchersController {
         query += ` AND sch.section_id = $2`;
         params.push(section_id);
       }
+
+      query += ` ORDER BY s.roll_no, s.name`;
 
       const students = await client.query(query, params);
 
@@ -1040,9 +1150,9 @@ class VouchersController {
       const preview = [];
 
       for (const student of students.rows) {
-        // Check for duplicate
+        // Check for duplicate voucher for this month
         const duplicateCheck = await client.query(
-          `SELECT id FROM fee_vouchers 
+          `SELECT id, month FROM fee_vouchers 
            WHERE student_class_history_id = $1 
            AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
           [student.enrollment_id, month]
@@ -1052,6 +1162,9 @@ class VouchersController {
           continue; // Skip students who already have a voucher for this month
         }
 
+        // Get individual monthly fee (already fetched in main query)
+        const individualMonthlyFee = student.individual_monthly_fee;
+
         // Check for student-specific fee overrides
         const feeOverrideResult = await client.query(
           `SELECT admission_fee, monthly_fee, paper_fund 
@@ -1060,14 +1173,18 @@ class VouchersController {
           [student.student_id, class_id]
         );
 
-        // Use override fees if they exist, otherwise use class defaults
+        const hasCustomFees = feeOverrideResult.rows.length > 0 || (individualMonthlyFee !== null && individualMonthlyFee !== undefined);
+
+        // Use fees in priority order: individual_monthly_fee > fee_override > class_default
         const effectiveFees = {
           admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
             ? feeOverrideResult.rows[0].admission_fee
             : fees.admission_fee,
-          monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
-            ? feeOverrideResult.rows[0].monthly_fee
-            : fees.monthly_fee,
+          monthly_fee: individualMonthlyFee !== null && individualMonthlyFee !== undefined
+            ? individualMonthlyFee
+            : (feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+              ? feeOverrideResult.rows[0].monthly_fee
+              : fees.monthly_fee),
           paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
             ? feeOverrideResult.rows[0].paper_fund
             : fees.paper_fund,
@@ -1082,43 +1199,57 @@ class VouchersController {
           [student.enrollment_id]
         );
         const isFirstEnrollment = isFirstVoucherForClass.rows.length === 0;
+        const isBulkImported = student.is_bulk_imported || false;
 
         // Build fee items for this student
         let feeItems = [];
 
-        // 1. One-time fees (Admission)
-        if (fee_types && fee_types.length > 0) {
-          if (fee_types.includes('ADMISSION')) {
+        // For bulk imported students (CSV import): ONLY monthly fee, always
+        if (isBulkImported) {
+          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+        } else {
+          // Regular admission flow
+
+          // 1. One-time fees (Admission) - only for first enrollment
+          if (fee_types && fee_types.length > 0) {
+            if (fee_types.includes('ADMISSION')) {
+              feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
+            }
+          } else if (isFirstEnrollment) {
+            // First voucher gets admission fee
             feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
           }
-        } else if (isFirstEnrollment) {
-          feeItems.push({ item_type: 'ADMISSION', amount: parseFloat(effectiveFees.admission_fee) || 0 });
-        }
 
-        // 2. Promotion fee (if applicable)
-        const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
-        if (isFirstEnrollment && promotionFee > 0) {
-          const historyCheck = await client.query(
-            `SELECT COUNT(*) as count FROM student_class_history 
-             WHERE student_id = $1 AND end_date IS NOT NULL`,
-            [student.student_id]
-          );
-          if (parseInt(historyCheck.rows[0].count) > 0) {
-            feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+          // 2. Promotion fee (if applicable)
+          const promotionFee = parseFloat(effectiveFees.promotion_fee) || 0;
+          if (isFirstEnrollment && promotionFee > 0) {
+            const historyCheck = await client.query(
+              `SELECT COUNT(*) as count FROM student_class_history 
+               WHERE student_id = $1 AND end_date IS NOT NULL`,
+              [student.student_id]
+            );
+            if (parseInt(historyCheck.rows[0].count) > 0) {
+              feeItems.push({ item_type: 'PROMOTION', amount: promotionFee });
+            }
           }
-        }
 
-        // 3. Recurring fees (Monthly, Paper Fund)
-        if (fee_types && fee_types.length > 0) {
-          if (fee_types.includes('MONTHLY')) {
+          // 3. Recurring fees
+          if (fee_types && fee_types.length > 0) {
+            // If specific fee types requested, use those
+            if (fee_types.includes('MONTHLY')) {
+              feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+            }
+            if (fee_types.includes('PAPER_FUND')) {
+              feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+            }
+          } else if (isFirstEnrollment) {
+            // First voucher (admission): include monthly AND paper fund
+            feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
+            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
+          } else {
+            // Subsequent vouchers: ONLY monthly fee
             feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
           }
-          if (fee_types.includes('PAPER_FUND')) {
-            feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
-          }
-        } else {
-          feeItems.push({ item_type: 'MONTHLY', amount: parseFloat(effectiveFees.monthly_fee) || 0 });
-          feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
         }
 
         // 4. Arrears logic
@@ -1138,6 +1269,19 @@ class VouchersController {
         const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
         if (totalArrears > 0) {
           feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
+        }
+
+        // 5. Add custom charges if provided
+        if (custom_charges && Array.isArray(custom_charges) && custom_charges.length > 0) {
+          for (const charge of custom_charges) {
+            if (charge.description && charge.amount && parseFloat(charge.amount) > 0) {
+              feeItems.push({ 
+                item_type: 'CUSTOM', 
+                amount: parseFloat(charge.amount),
+                description: charge.description 
+              });
+            }
+          }
         }
 
         // Apply discount if exists
@@ -1167,15 +1311,22 @@ class VouchersController {
         preview.push({
           student_id: student.student_id,
           student_name: student.student_name,
+          father_name: student.father_name,
           roll_no: student.roll_no,
           items: feeItems,
-          total_amount: totalAmount
+          total_amount: totalAmount,
+          has_custom_fees: hasCustomFees
         });
       }
+
+      const totalAmount = preview.reduce((sum, v) => sum + v.total_amount, 0);
+      const studentsWithCustomFees = preview.filter(v => v.has_custom_fees).length;
 
       return ApiResponse.success(res, {
         summary: {
           total_students: preview.length,
+          total_amount: totalAmount,
+          students_with_custom_fees: studentsWithCustomFees,
           month: new Date(month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
         },
         vouchers: preview
@@ -1242,7 +1393,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, s.father_name, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -1267,17 +1418,20 @@ class VouchersController {
       const vouchersData = [];
 
       for (const student of students.rows) {
-        // Check for duplicate
+        // Check for duplicate voucher for this month
         const duplicateCheck = await client.query(
-          `SELECT id FROM fee_vouchers 
+          `SELECT id, month FROM fee_vouchers 
            WHERE student_class_history_id = $1 
            AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
           [student.enrollment_id, voucherMonth]
         );
 
         if (duplicateCheck.rows.length > 0) {
-          continue;
+          continue; // Skip if voucher already exists
         }
+
+        // Get individual monthly fee (already fetched in main query)
+        const individualMonthlyFee = student.individual_monthly_fee;
 
         // Check for student-specific fee overrides
         const feeOverrideResult = await client.query(
@@ -1287,13 +1441,16 @@ class VouchersController {
           [student.student_id, classId]
         );
 
+        // Use fees in priority order: individual_monthly_fee > fee_override > class_default
         const effectiveFees = {
           admission_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].admission_fee !== null
             ? feeOverrideResult.rows[0].admission_fee
             : fees.admission_fee,
-          monthly_fee: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
-            ? feeOverrideResult.rows[0].monthly_fee
-            : fees.monthly_fee,
+          monthly_fee: individualMonthlyFee !== null && individualMonthlyFee !== undefined
+            ? individualMonthlyFee
+            : (feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].monthly_fee !== null
+              ? feeOverrideResult.rows[0].monthly_fee
+              : fees.monthly_fee),
           paper_fund: feeOverrideResult.rows.length > 0 && feeOverrideResult.rows[0].paper_fund !== null
             ? feeOverrideResult.rows[0].paper_fund
             : fees.paper_fund,
@@ -1380,6 +1537,7 @@ class VouchersController {
 
         vouchersData.push({
           student_name: student.student_name,
+          father_name: student.father_name,
           roll_no: student.roll_no,
           class_name: classInfo.rows[0].class_name,
           class_type: classInfo.rows[0].class_type,
@@ -1397,6 +1555,111 @@ class VouchersController {
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
 
+      const fs = require('fs');
+      const fileStream = fs.createReadStream(filepath);
+      
+      fileStream.pipe(res);
+      
+      fileStream.on('end', () => {
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+      });
+
+      fileStream.on('error', (err) => {
+        if (fs.existsSync(filepath)) {
+          fs.unlinkSync(filepath);
+        }
+        next(err);
+      });
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Bulk print multiple vouchers in a single PDF
+   * POST /api/vouchers/bulk-print
+   */
+  async bulkPrintPDF(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { voucher_ids } = req.body;
+
+      // Validate input
+      if (!Array.isArray(voucher_ids) || voucher_ids.length === 0) {
+        return ApiResponse.error(res, 'voucher_ids must be a non-empty array', 400);
+      }
+
+      // Fetch all vouchers with their details
+      const query = `
+        SELECT 
+          v.id,
+          v.month,
+          v.created_at,
+          s.id as student_id,
+          s.name as student_name,
+          s.father_name,
+          s.roll_no,
+          c.name as class_name,
+          sec.name as section_name,
+          SUM(vi.amount) as total_amount,
+          COALESCE(MAX(p.paid_total), 0) as paid_amount,
+          json_agg(
+            json_build_object(
+              'item_type', vi.item_type,
+              'amount', vi.amount
+            ) ORDER BY vi.id
+          ) as items
+        FROM fee_vouchers v
+        JOIN student_class_history sch ON v.student_class_history_id = sch.id
+        JOIN students s ON sch.student_id = s.id
+        JOIN classes c ON sch.class_id = c.id
+        LEFT JOIN sections sec ON sch.section_id = sec.id
+        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+        LEFT JOIN (
+          SELECT voucher_id, SUM(amount) as paid_total 
+          FROM fee_payments 
+          GROUP BY voucher_id
+        ) p ON v.id = p.voucher_id
+        WHERE v.id = ANY($1::int[])
+        GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, 
+                 s.roll_no, c.name, sec.name
+        ORDER BY c.name, s.roll_no, s.name
+      `;
+
+      const result = await client.query(query, [voucher_ids]);
+
+      if (result.rows.length === 0) {
+        return ApiResponse.error(res, 'No vouchers found with the provided IDs', 404);
+      }
+
+      // Format vouchers data for PDF generation
+      const vouchersData = result.rows.map(row => ({
+        id: row.id,
+        voucher_no: `V-${row.id}`, // Generate voucher number from ID
+        student_name: row.student_name,
+        father_name: row.father_name,
+        roll_no: row.roll_no,
+        class_name: row.class_name,
+        section_name: row.section_name,
+        month: row.month,
+        items: row.items,
+        total_amount: parseFloat(row.total_amount),
+        paid_amount: parseFloat(row.paid_amount) || 0
+      }));
+
+      // Generate bulk PDF using pdf.service
+      const pdfService = require('../services/pdf.service');
+      const { filepath, filename } = await pdfService.generateBulkFeeVouchers(vouchersData);
+
+      // Set response headers for inline display
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+
+      // Stream the PDF file
       const fs = require('fs');
       const fileStream = fs.createReadStream(filepath);
       

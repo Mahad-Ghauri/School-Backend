@@ -37,6 +37,9 @@ router.get('/:id/pdf', staffOnly, vouchersController.downloadPDF);
 // Print voucher as PDF inline (staff can print)
 router.get('/:id/print', staffOnly, vouchersController.printPDF);
 
+// Bulk print multiple vouchers in one PDF (staff can print)
+router.post('/bulk-print', staffOnly, vouchersController.bulkPrintPDF);
+
 // Update voucher items (admin only)
 router.put('/:id/items', adminOnly, vouchersController.updateItems);
 

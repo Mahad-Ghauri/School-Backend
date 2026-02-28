@@ -25,6 +25,8 @@ class StudentsController {
     this.transfer = this.transfer.bind(this);
     this.promote = this.promote.bind(this);
     this.bulkCreate = this.bulkCreate.bind(this);
+    this.bulkDeactivate = this.bulkDeactivate.bind(this);
+    this.bulkDelete = this.bulkDelete.bind(this);
   }
 
   /**
@@ -341,13 +343,23 @@ class StudentsController {
       let query = `
         SELECT s.id, s.name, s.roll_no, s.phone, s.address, s.date_of_birth, 
                s.bay_form, s.caste, s.previous_school, s.is_expelled, s.is_active, s.created_at,
+               s.father_name, s.individual_monthly_fee, s.is_fee_free,
                c.name as current_class_name,
                c.class_type,
-               sec.name as current_section_name
+               sec.name as current_section_name,
+               cfs.monthly_fee as class_monthly_fee,
+               cfs.admission_fee,
+               cfs.paper_fund,
+               g.name as father_guardian_name,
+               s.phone as father_contact_number,
+               COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee
         FROM students s
         LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
         LEFT JOIN classes c ON sch.class_id = c.id
         LEFT JOIN sections sec ON sch.section_id = sec.id
+        LEFT JOIN class_fee_structure cfs ON c.id = cfs.class_id 
+        LEFT JOIN student_guardians sg ON s.id = sg.student_id AND sg.relation = 'Father'
+        LEFT JOIN guardians g ON sg.guardian_id = g.id
         WHERE 1=1
       `;
 
@@ -384,25 +396,52 @@ class StudentsController {
         paramCount++;
       }
 
-      query += ` GROUP BY s.id, c.name, c.class_type, sec.name`;
-
       // Count total records
-      const countQuery = `
+      let countQuery = `
         SELECT COUNT(DISTINCT s.id)
         FROM students s
         LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
         WHERE 1=1
-      ` + (is_active !== undefined ? ` AND s.is_active = $${params.indexOf(is_active === 'true') + 1}` : '')
-        + (is_expelled !== undefined ? ` AND s.is_expelled = $${params.findIndex(p => p === (is_expelled === 'true')) + 1}` : '')
-        + (class_id ? ` AND sch.class_id = $${params.indexOf(class_id) + 1}` : '')
-        + (section_id ? ` AND sch.section_id = $${params.indexOf(section_id) + 1}` : '')
-        + (search ? ` AND (s.name ILIKE $${params.indexOf(`%${search}%`) + 1} OR s.roll_no ILIKE $${params.indexOf(`%${search}%`) + 1} OR s.phone ILIKE $${params.indexOf(`%${search}%`) + 1})` : '');
+      `;
 
-      const countResult = await client.query(countQuery, params);
+      let countParams = [];
+      let countParamCount = 1;
+
+      if (is_active !== undefined) {
+        countQuery += ` AND s.is_active = $${countParamCount}`;
+        countParams.push(is_active === 'true');
+        countParamCount++;
+      }
+
+      if (is_expelled !== undefined) {
+        countQuery += ` AND s.is_expelled = $${countParamCount}`;
+        countParams.push(is_expelled === 'true');
+        countParamCount++;
+      }
+
+      if (class_id) {
+        countQuery += ` AND sch.class_id = $${countParamCount}`;
+        countParams.push(class_id);
+        countParamCount++;
+      }
+
+      if (section_id) {
+        countQuery += ` AND sch.section_id = $${countParamCount}`;
+        countParams.push(section_id);
+        countParamCount++;
+      }
+
+      if (search) {
+        countQuery += ` AND (s.name ILIKE $${countParamCount} OR s.roll_no ILIKE $${countParamCount} OR s.phone ILIKE $${countParamCount})`;
+        countParams.push(`%${search}%`);
+        countParamCount++;
+      }
+
+      const countResult = await client.query(countQuery, countParams);
       const total = parseInt(countResult.rows[0].count);
 
       // Add pagination
-      query += ` ORDER BY s.name`;
+      query += ` ORDER BY s.created_at ASC`; // Order by creation time to put new students at bottom
       query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
       params.push(limit, (page - 1) * limit);
 
@@ -531,6 +570,225 @@ class StudentsController {
       const updatedStudent = await this.getStudentById(client, id);
 
       return ApiResponse.success(res, updatedStudent, 'Student updated successfully');
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Update basic student information
+   * PATCH /api/students/:id/basic-info
+   */
+  async updateBasicInfo(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { id } = req.params;
+      const { name, father_name, phone, individual_monthly_fee } = req.body;
+
+      // Validate input
+      const schema = Joi.object({
+        name: Joi.string().optional(),
+        father_name: Joi.string().optional().allow('', null),
+        phone: Joi.string().optional().allow('', null),
+        individual_monthly_fee: Joi.number().optional().allow(null)
+      });
+
+      const { error } = schema.validate(req.body);
+      if (error) {
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      const updates = [];
+      const values = [];
+      let paramCount = 1;
+
+      if (name !== undefined) {
+        updates.push(`name = $${paramCount}`);
+        values.push(name);
+        paramCount++;
+      }
+
+      if (father_name !== undefined) {
+        updates.push(`father_name = $${paramCount}`);
+        values.push(father_name || null);
+        paramCount++;
+      }
+
+      if (phone !== undefined) {
+        updates.push(`phone = $${paramCount}`);
+        values.push(phone || null);
+        paramCount++;
+      }
+
+      if (individual_monthly_fee !== undefined) {
+        updates.push(`individual_monthly_fee = $${paramCount}`);
+        values.push(individual_monthly_fee);
+        paramCount++;
+      }
+
+      if (updates.length === 0) {
+        return ApiResponse.error(res, 'No fields to update', 400);
+      }
+
+      values.push(id);
+      const result = await client.query(
+        `UPDATE students SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING *`,
+        values
+      );
+
+      if (result.rows.length === 0) {
+        return ApiResponse.error(res, 'Student not found', 404);
+      }
+
+      return ApiResponse.success(res, result.rows[0], 'Student information updated successfully');
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Mark students as fee-free (bulk operation)
+   * POST /api/students/mark-free
+   */
+  async markFree(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { student_identifiers, class_id, section_id } = req.body;
+
+      if (!student_identifiers || !Array.isArray(student_identifiers) || student_identifiers.length === 0) {
+        return ApiResponse.error(res, 'student_identifiers array is required', 400);
+      }
+
+      const studentIds = [];
+      
+      // Find student IDs based on identifiers
+      for (const identifier of student_identifiers) {
+        const { name, roll_no, phone } = identifier;
+        
+        let query = `
+          SELECT s.id 
+          FROM students s
+          LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+          WHERE s.name = $1
+        `;
+        const params = [name];
+        let paramCount = 2;
+
+        if (roll_no) {
+          query += ` AND s.roll_no = $${paramCount}`;
+          params.push(roll_no);
+          paramCount++;
+        }
+
+        if (class_id) {
+          query += ` AND sch.class_id = $${paramCount}`;
+          params.push(class_id);
+          paramCount++;
+        }
+
+        if (section_id) {
+          query += ` AND sch.section_id = $${paramCount}`;
+          params.push(section_id);
+          paramCount++;
+        }
+
+        const result = await client.query(query, params);
+        if (result.rows.length > 0) {
+          studentIds.push(result.rows[0].id);
+        }
+      }
+
+      if (studentIds.length === 0) {
+        return ApiResponse.error(res, 'No matching students found', 404);
+      }
+
+      // Mark students as fee-free
+      const updateResult = await client.query(
+        `UPDATE students SET is_fee_free = true WHERE id = ANY($1) RETURNING id, name`,
+        [studentIds]
+      );
+
+      return ApiResponse.success(res, {
+        markedCount: updateResult.rows.length,
+        students: updateResult.rows
+      }, `Successfully marked ${updateResult.rows.length} student(s) as fee-free`);
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Unmark students as fee-free (bulk operation)
+   * POST /api/students/unmark-free
+   */
+  async unmarkFree(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { student_identifiers, class_id, section_id } = req.body;
+
+      if (!student_identifiers || !Array.isArray(student_identifiers) || student_identifiers.length === 0) {
+        return ApiResponse.error(res, 'student_identifiers array is required', 400);
+      }
+
+      const studentIds = [];
+      
+      // Find student IDs based on identifiers
+      for (const identifier of student_identifiers) {
+        const { name, roll_no, phone } = identifier;
+        
+        let query = `
+          SELECT s.id 
+          FROM students s
+          LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+          WHERE s.name = $1
+        `;
+        const params = [name];
+        let paramCount = 2;
+
+        if (roll_no) {
+          query += ` AND s.roll_no = $${paramCount}`;
+          params.push(roll_no);
+          paramCount++;
+        }
+
+        if (class_id) {
+          query += ` AND sch.class_id = $${paramCount}`;
+          params.push(class_id);
+          paramCount++;
+        }
+
+        if (section_id) {
+          query += ` AND sch.section_id = $${paramCount}`;
+          params.push(section_id);
+          paramCount++;
+        }
+
+        const result = await client.query(query, params);
+        if (result.rows.length > 0) {
+          studentIds.push(result.rows[0].id);
+        }
+      }
+
+      if (studentIds.length === 0) {
+        return ApiResponse.error(res, 'No matching students found', 404);
+      }
+
+      // Unmark students as fee-free
+      const updateResult = await client.query(
+        `UPDATE students SET is_fee_free = false WHERE id = ANY($1) RETURNING id, name`,
+        [studentIds]
+      );
+
+      return ApiResponse.success(res, {
+        unmarkedCount: updateResult.rows.length,
+        students: updateResult.rows
+      }, `Successfully unmarked ${updateResult.rows.length} student(s) as fee-free`);
     } catch (error) {
       next(error);
     } finally {
@@ -1173,9 +1431,9 @@ class StudentsController {
    * Bulk create students with flexible field support
    * POST /api/students/bulk
    * 
-   * Accepts any CSV fields and gracefully handles missing data.
-   * Required fields: at least firstName OR name, classId, sectionId
-   * All other fields are optional and will be set to NULL if missing
+   * Accepts CSV with 3 header rows (automatically skipped by frontend)
+   * Core Required fields: Name, Father Name
+   * Optional fields: Sr No, Contact No, Fee, and any other custom fields
    */
   async bulkCreate(req, res, next) {
     const client = await pool.connect();
@@ -1211,39 +1469,34 @@ class StudentsController {
         return ApiResponse.error(res, 'Too many students: maximum 1000 allowed per batch', 400);
       }
 
-      // Minimal validation - accept almost anything
+      // Flexible validation - Updated for new CSV structure: Sr No, Name, Father Name, Father's Contact Number, Fee
       const schema = Joi.object({
-        // Name fields - at least one should exist, but we'll handle it flexibly
+        // Core fields from new CSV structure
+        srNo: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        name: Joi.string().required(), // Required
+        fatherName: Joi.string().optional().allow('', null), // Optional (may be blank)
+        fatherContactNo: Joi.string().optional().allow('', null), // Father's contact number
+        monthlyFee: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null), // Individual monthly fee
+        
+        // System fields
+        classId: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        sectionId: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null),
+        
+        // Legacy/optional fields for compatibility
+        contactNo: Joi.string().optional().allow('', null), // Fallback for contact
+        fee: Joi.alternatives().try(Joi.number(), Joi.string()).optional().allow('', null), // Legacy fee field
         firstName: Joi.string().optional().allow('', null),
         lastName: Joi.string().optional().allow('', null),
-        name: Joi.string().optional().allow('', null),
-        
-        // Contact fields - all optional, no format validation
         email: Joi.string().optional().allow('', null),
         phone: Joi.string().optional().allow('', null),
-        
-        // Identifier - completely optional
         rollNumber: Joi.string().optional().allow('', null),
-        
-        // Class assignment - required for bulk import
-        classId: Joi.number().optional().allow('', null),
-        sectionId: Joi.number().optional().allow('', null),
-        
-        // All other fields optional
         address: Joi.string().optional().allow('', null),
-        fatherName: Joi.string().optional().allow('', null),
-        motherName: Joi.string().optional().allow('', null),
-        guardianName: Joi.string().optional().allow('', null),
-        guardianPhone: Joi.string().optional().allow('', null),
         dateOfBirth: Joi.alternatives().try(Joi.date(), Joi.string()).optional().allow('', null),
-        gender: Joi.string().optional().allow('', null),
-        bloodGroup: Joi.string().optional().allow('', null),
-        religion: Joi.string().optional().allow('', null),
-        caste: Joi.string().optional().allow('', null),
-        nationality: Joi.string().optional().allow('', null),
-        admissionDate: Joi.alternatives().try(Joi.date(), Joi.string()).optional().allow('', null),
-        previousSchool: Joi.string().optional().allow('', null),
-        bayForm: Joi.string().optional().allow('', null),
+        
+        // Raw data and other fields
+        otherFields: Joi.string().optional().allow('', null),
+        _rawData: Joi.object().optional().unknown(true),
+        id: Joi.number().optional(), // Internal ID for grid
         
         // Allow any additional fields without validation
       }).unknown(true);
@@ -1251,6 +1504,9 @@ class StudentsController {
       const validatedStudents = [];
       const errors = [];
       const warnings = [];
+
+      console.log('📥 Bulk create received', students.length, 'students');
+      console.log('📋 First student received:', students[0]);
 
       for (let i = 0; i < students.length; i++) {
         const student = students[i];
@@ -1264,62 +1520,96 @@ class StudentsController {
           continue;
         }
 
-        // Build name from available fields - be extremely flexible
+        // Build student name - REQUIRED
         let studentName = value.name || '';
         if (!studentName && (value.firstName || value.lastName)) {
           studentName = `${value.firstName || ''} ${value.lastName || ''}`.trim();
         }
         
-        // If still no name, create a placeholder
         if (!studentName) {
-          studentName = `Student ${i + 1}`;
-          warnings.push({
+          errors.push({
             row: i + 1,
-            message: 'No name provided, using placeholder name'
+            errors: ['Name is required']
           });
+          continue;
         }
+
+        // Father name - extract from various possible fields
+        const fatherName = value.fatherName || value.father_name || '';
 
         // Use provided class/section or defaults
-        const classId = value.classId || 1; // Default class
-        const sectionId = value.sectionId || 1; // Default section
+        const classId = parseInt(value.classId) || 1; // Default class
+        const sectionId = parseInt(value.sectionId) || 1; // Default section
 
-        // Generate roll number if missing
-        let rollNo = value.rollNumber || null;
-        if (!rollNo) {
-          rollNo = `AUTO-${Date.now()}-${i}`; // Simple auto-generation
+        // Generate roll number from Sr No (CSV sequence) or auto-generate
+        let rollNo = value.srNo || value.rollNumber || null;
+        if (rollNo) {
+          // Use Sr No from CSV as roll number to maintain sequence
+          rollNo = String(rollNo).padStart(3, '0'); // Format as 001, 002, etc.
+        } else {
+          rollNo = `STD-${Date.now()}-${i}`; // Auto-generation fallback
           warnings.push({
             row: i + 1,
-            message: 'Roll number auto-generated'
+            message: 'Roll number auto-generated (Sr No not provided)'
           });
         }
 
-        // Prepare student data with NULL for missing fields
-        // Only use fields that exist in the database schema
-        const additionalFields = {};
-        Object.keys(value).forEach(key => {
-          if (![
-            'firstName', 'lastName', 'name',  'email', 'phone', 'rollNumber',
-            'address', 'classId', 'sectionId', 'dateOfBirth', 'bayForm',
-            'caste', 'previousSchool'
-          ].includes(key)) {
-            additionalFields[key] = value[key];
+        // Extract phone from new structure: fatherContactNo, then fallbacks
+        const phone = value.fatherContactNo || value.contactNo || value.phone || null;
+        
+        // Extract individual monthly fee (can be different from class fee structure)
+        const individualMonthlyFee = value.monthlyFee || value.fee || null;
+        let monthlyFeeAmount = null;
+        if (individualMonthlyFee) {
+          monthlyFeeAmount = parseFloat(individualMonthlyFee) || null;
+        }
+
+        // Log first student for debugging
+        if (i === 0) {
+          console.log('🔍 First student RECEIVED from frontend:', {
+            rawFields: Object.keys(value),
+            name: value.name,
+            fatherName: value.fatherName,
+            fatherContactNo: value.fatherContactNo,
+            monthlyFee: value.monthlyFee,
+            srNo: value.srNo
+          });
+          console.log('🔍 First student EXTRACTED for database:', {
+            name: studentName,
+            father_name: fatherName,
+            phone: phone,
+            individual_monthly_fee: monthlyFeeAmount,
+            roll_no: rollNo
+          });
+        }
+
+        // Parse raw data for additional fields
+        let additionalFields = {};
+        if (value._rawData) {
+          additionalFields = { ...value._rawData };
+        }
+        if (value.otherFields) {
+          try {
+            const parsed = JSON.parse(value.otherFields);
+            additionalFields = { ...additionalFields, ...parsed };
+          } catch (e) {
+            // Ignore parse errors
           }
-        });
+        }
 
         validatedStudents.push({
           name: studentName,
-          roll_no: rollNo,
+          father_name: fatherName,
+          roll_no: String(rollNo),
+          phone: phone,
           email: value.email || null,
-          phone: value.phone || null,
           address: value.address || null,
           class_id: classId,
           section_id: sectionId,
           date_of_birth: value.dateOfBirth || null,
-          bay_form: value.bayForm || null,
-          caste: value.caste || null,
-          previous_school: value.previousSchool || null,
+          individual_monthly_fee: monthlyFeeAmount, // Store individual monthly fee
           admission_date: value.admissionDate || new Date(),
-          // Store any additional unknown fields as JSON for future use
+          // Store any additional fields as JSON
           additional_info: Object.keys(additionalFields).length > 0 
             ? JSON.stringify(additionalFields) 
             : null
@@ -1342,104 +1632,391 @@ class StudentsController {
       const targetSectionId = validatedStudents[0].section_id || 1;
 
       // Auto-generate unique roll numbers for all students
-      let rollNumberCounter = Date.now(); // Use timestamp for uniqueness
+      // Insert all students without validation - duplicates allowed
+      const insertedStudents = [];
 
-      // Generate unique roll numbers for all
-      validatedStudents.forEach((student, index) => {
+      for (let i = 0; i < validatedStudents.length; i++) {
+        const student = validatedStudents[i];
+        
+        // Auto-generate roll_no if not provided
         if (!student.roll_no) {
-          student.roll_no = `AUTO-${rollNumberCounter}-${index}`;
+          student.roll_no = `AUTO-${Date.now()}-${i}`;
         }
-      });
 
-      // Prepare bulk insert with only existing database fields
-      const values = [];
-      const placeholders = [];
-      let paramIndex = 1;
+        // Log what we're about to insert (first student only)
+        if (i === 0) {
+          console.log('💾 Inserting first student into database:', {
+            name: student.name,
+            roll_no: student.roll_no,
+            phone: student.phone,
+            father_name: student.father_name,
+            individual_monthly_fee: student.individual_monthly_fee
+          });
+        }
 
-      validatedStudents.forEach((student) => {
-        const studentValues = [
-          student.name,
-          student.roll_no,
-          student.phone,
-          student.address,
-          student.email,
-          student.date_of_birth,
-          student.bay_form,
-          student.caste,
-          student.previous_school
-        ];
-        
-        values.push(...studentValues);
-        const params = Array.from({ length: 9 }, (_, i) => `$${paramIndex + i}`).join(', ');
-        placeholders.push(`(${params})`);
-        paramIndex += 9;
-      });
-
-      // Insert students with existing database fields
-      const insertQuery = `
-        INSERT INTO students (
-          name, roll_no, phone, address, email,
-          date_of_birth, bay_form, caste, previous_school
-        )
-        VALUES ${placeholders.join(', ')}
-        RETURNING id, name, roll_no, email
-      `;
-
-      console.log('🔍 Executing student insert with query:', insertQuery.substring(0, 200) + '...')
-      console.log('🔍 First few values:', values.slice(0, 10))
-
-      const insertResult = await client.query(insertQuery, values);
-      const insertedStudents = insertResult.rows;
-
-      // Enroll ALL students in the specified section
-      const enrollmentValues = [];
-      const enrollmentPlaceholders = [];
-      paramIndex = 1;
-
-      for (let i = 0; i < insertedStudents.length; i++) {
-        const student = insertedStudents[i];
-        
-        // Enroll in the target class and section
-        enrollmentValues.push(
-          student.id,
-          targetClassId,
-          targetSectionId,
-          validatedStudents[i].admission_date || new Date()
+        const insertResult = await client.query(
+          `INSERT INTO students (
+            name, roll_no, phone, address, email, father_name,
+            date_of_birth, bay_form, caste, previous_school, is_bulk_imported, individual_monthly_fee
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, $11)
+          RETURNING id, name, roll_no, phone, email, father_name, individual_monthly_fee`,
+          [
+            student.name,
+            student.roll_no,
+            student.phone,
+            student.address,
+            student.email,
+            student.father_name,
+            student.date_of_birth,
+            student.bay_form,
+            student.caste,
+            student.previous_school,
+            student.individual_monthly_fee // Individual monthly fee from CSV
+          ]
         );
-        enrollmentPlaceholders.push(`($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3})`);
-        paramIndex += 4;
+        
+        // Verify phone was saved (first student only)
+        if (i === 0) {
+          console.log('✅ First student saved to database:', {
+            id: insertResult.rows[0].id,
+            name: insertResult.rows[0].name,
+            phone: insertResult.rows[0].phone,
+            father_name: insertResult.rows[0].father_name
+          });
+        }
+
+        const newStudent = insertResult.rows[0];
+        insertedStudents.push(newStudent);
+
+        // Enroll in the target class
+        await client.query(
+          `INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
+           VALUES ($1, $2, $3, $4)`,
+          [newStudent.id, targetClassId, targetSectionId, student.admission_date || new Date()]
+        );
       }
 
-      const enrollmentQuery = `
-        INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
-        VALUES ${enrollmentPlaceholders.join(', ')}
-      `;
-
-      await client.query(enrollmentQuery, enrollmentValues);
-
       await client.query('COMMIT');
-
+      
       return ApiResponse.success(res, {
         successCount: insertedStudents.length,
         students: insertedStudents,
         classId: targetClassId,
         sectionId: targetSectionId,
-        className: 'Default Class',
-        sectionName: 'Default Section',
         warnings: warnings.length > 0 ? warnings : undefined
-      }, `Successfully imported ${insertedStudents.length} student(s) without validation restrictions`);
+      }, `Successfully imported ${insertedStudents.length} student(s)`);
 
     } catch (error) {
       await client.query('ROLLBACK');
-      
-      if (error.code === '23505') {
-        // PostgreSQL unique constraint violation - make roll numbers unique and retry
-        console.log('🔄 Duplicate constraint hit, will auto-fix roll numbers');
-        // Don't return error, let it continue with warnings
-      }
-      
       console.error('Bulk import error:', error);
       next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Bulk deactivate all students (clear admission list)
+   * POST /api/students/bulk-deactivate
+   */
+  async bulkDeactivate(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Get count of currently active students
+      const countResult = await client.query(
+        'SELECT COUNT(*) as count FROM students WHERE is_active = true'
+      );
+      const activeCount = parseInt(countResult.rows[0].count);
+
+      if (activeCount === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.success(res, {
+          deactivatedCount: 0,
+          message: 'No active students found to deactivate'
+        }, 'No students were deactivated');
+      }
+
+      // Deactivate all active students
+      const result = await client.query(
+        `UPDATE students 
+         SET is_active = false
+         WHERE is_active = true 
+         RETURNING id, name`
+      );
+
+      await client.query('COMMIT');
+
+      return ApiResponse.success(res, {
+        deactivatedCount: result.rows.length,
+        deactivatedStudents: result.rows
+      }, `Successfully deactivated ${result.rows.length} student(s) from admission list`);
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Bulk deactivate error:', error);
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Bulk delete students permanently from database with full power
+   * POST /api/students/bulk-delete
+   * Body: { student_ids: [1, 2, 3, ...] }
+   * Handles all edge cases - from single table to full multi-table students
+   */
+  async bulkDelete(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      console.log('🗑️ Starting bulk delete operation...');
+
+      const { student_identifiers, class_id, section_id } = req.body;
+
+      // Validate input
+      if (!Array.isArray(student_identifiers) || student_identifiers.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'student_identifiers must be a non-empty array', 400);
+      }
+
+      if (!class_id) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'class_id is required for context validation', 400);
+      }
+
+      console.log('🔍 Processing deletion for students in class:', class_id, 'section:', section_id);
+      console.log('📋 Student identifiers:', student_identifiers);
+
+      // Build query to find students by name/roll_no in the specific class/section
+      let studentQuery = `
+        SELECT DISTINCT s.id, s.name, s.roll_no, s.phone,
+               sch.class_id, sch.section_id,
+               c.name as class_name, sec.name as section_name
+        FROM students s
+        JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+        LEFT JOIN classes c ON sch.class_id = c.id
+        LEFT JOIN sections sec ON sch.section_id = sec.id
+        WHERE sch.class_id = $1`;
+
+      let queryParams = [class_id];
+      let paramIndex = 2;
+
+      // Add section filter if provided
+      if (section_id) {
+        studentQuery += ` AND sch.section_id = $${paramIndex}`;
+        queryParams.push(section_id);
+        paramIndex++;
+      }
+
+      // Add condition to match student identifiers
+      const identifierConditions = student_identifiers.map((_, index) => {
+        const nameParam = paramIndex++;
+        const rollParam = paramIndex++;
+        const phoneParam = paramIndex++;
+        return `(s.name = $${nameParam} AND COALESCE(s.roll_no, '') = COALESCE($${rollParam}, '') AND COALESCE(s.phone, '') = COALESCE($${phoneParam}, ''))`;
+      });
+
+      if (identifierConditions.length > 0) {
+        studentQuery += ` AND (${identifierConditions.join(' OR ')})`;
+        
+        // Add parameters for each student identifier
+        student_identifiers.forEach(identifier => {
+          queryParams.push(identifier.name, identifier.roll_no || '', identifier.phone || '');
+        });
+      }
+
+      // Get student details that match the criteria
+      const studentsToDelete = await client.query(studentQuery, queryParams);
+
+      const existingStudentIds = studentsToDelete.rows.map(s => s.id);
+      console.log(`📊 Found ${existingStudentIds.length} matching students out of ${student_identifiers.length} requested`);
+
+      if (existingStudentIds.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.success(res, {
+          deletedCount: 0,
+          message: 'No students found matching the provided identifiers in this class/section'
+        }, 'No students were deleted');
+      }
+
+      // Log what we found for verification
+      studentsToDelete.rows.forEach(student => {
+        console.log(`✅ Found: ${student.name} (Roll: ${student.roll_no}) in ${student.class_name}-${student.section_name}`);
+      });
+
+      // Group students by class and section for strength updates
+      const classUpdates = {};
+      studentsToDelete.rows.forEach(student => {
+        if (student.class_id && student.section_id) {
+          const key = `${student.class_id}-${student.section_id}`;
+          if (!classUpdates[key]) {
+            classUpdates[key] = {
+              class_id: student.class_id,
+              section_id: student.section_id,
+              count: 0
+            };
+          }
+          classUpdates[key].count++;
+        }
+      });
+
+      console.log('📋 Class updates to perform:', classUpdates);
+
+      // PHASE 1: Delete from all possible related tables
+      // Order matters for foreign key constraints
+      const deletionSteps = [
+        {
+          name: 'fee_payments (via fee_vouchers)',
+          query: `DELETE FROM fee_payments WHERE voucher_id IN (
+            SELECT fv.id FROM fee_vouchers fv 
+            WHERE fv.student_class_history_id IN (
+              SELECT sch.id FROM student_class_history sch WHERE sch.student_id = ANY($1::int[])
+            )
+          )`
+        },
+        {
+          name: 'fee_voucher_items',
+          query: `DELETE FROM fee_voucher_items WHERE voucher_id IN (
+            SELECT fv.id FROM fee_vouchers fv 
+            WHERE fv.student_class_history_id IN (
+              SELECT sch.id FROM student_class_history sch WHERE sch.student_id = ANY($1::int[])
+            )
+          )`
+        },
+        {
+          name: 'fee_vouchers',
+          query: `DELETE FROM fee_vouchers WHERE student_class_history_id IN (
+            SELECT sch.id FROM student_class_history sch WHERE sch.student_id = ANY($1::int[])
+          )`
+        },
+        {
+          name: 'salary_payments (if student-related)',
+          query: `DELETE FROM salary_payments WHERE faculty_id IN (
+            SELECT f.id FROM faculty f WHERE f.student_id = ANY($1::int[])
+          )`,
+          optional: true
+        },
+        {
+          name: 'student_documents',
+          query: 'DELETE FROM student_documents WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
+        {
+          name: 'student_fee_overrides',
+          query: 'DELETE FROM student_fee_overrides WHERE student_id = ANY($1::int[])'
+        },
+        {
+          name: 'student_discounts',
+          query: 'DELETE FROM student_discounts WHERE student_id = ANY($1::int[])'
+        },
+        {
+          name: 'student_guardians',
+          query: 'DELETE FROM student_guardians WHERE student_id = ANY($1::int[])'
+        },
+        {
+          name: 'student_class_history',
+          query: 'DELETE FROM student_class_history WHERE student_id = ANY($1::int[])'
+        },
+        {
+          name: 'attendance_records',
+          query: 'DELETE FROM attendance_records WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
+        {
+          name: 'exam_results',
+          query: 'DELETE FROM exam_results WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
+        {
+          name: 'student_assignments',
+          query: 'DELETE FROM student_assignments WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
+        {
+          name: 'library_records',
+          query: 'DELETE FROM library_records WHERE student_id = ANY($1::int[])',
+          optional: true
+        }
+      ];
+
+      // Execute all deletion steps
+      for (const step of deletionSteps) {
+        try {
+          const result = await client.query(step.query, [existingStudentIds]);
+          console.log(`✅ ${step.name}: Deleted ${result.rowCount || 0} records`);
+        } catch (error) {
+          if (step.optional) {
+            console.log(`⚠️  ${step.name}: Table may not exist or no records (${error.message})`);
+          } else {
+            console.error(`❌ ${step.name}: Failed -`, error.message);
+            throw error; // Re-throw non-optional errors
+          }
+        }
+      }
+
+      // PHASE 2: Delete the main student records
+      console.log('🎯 Deleting main student records...');
+      const deleteResult = await client.query(
+        'DELETE FROM students WHERE id = ANY($1::int[]) RETURNING id, name, roll_no',
+        [existingStudentIds]
+      );
+
+      console.log(`✅ Deleted ${deleteResult.rows.length} student records`);
+
+      // PHASE 3: Update class strength for affected sections
+      console.log('📊 Updating class strengths...');
+      for (const update of Object.values(classUpdates)) {
+        try {
+          const strengthResult = await client.query(
+            `UPDATE sections 
+             SET current_strength = GREATEST(0, current_strength - $1)
+             WHERE id = $2 AND class_id = $3
+             RETURNING current_strength`,
+            [update.count, update.section_id, update.class_id]
+          );
+          
+          if (strengthResult.rows.length > 0) {
+            console.log(`📉 Updated section ${update.section_id} strength: -${update.count} (new: ${strengthResult.rows[0].current_strength})`);
+          }
+        } catch (error) {
+          console.error(`⚠️  Failed to update strength for section ${update.section_id}:`, error.message);
+          // Don't fail the whole operation for strength update issues
+        }
+      }
+
+      await client.query('COMMIT');
+      console.log('✅ Bulk delete completed successfully');
+
+      return ApiResponse.success(res, {
+        deletedCount: deleteResult.rows.length,
+        deletedStudents: deleteResult.rows,
+        classUpdates: Object.values(classUpdates),
+        matchedStudents: studentsToDelete.rows.length,
+        requestedCount: student_identifiers.length
+      }, `Successfully deleted ${deleteResult.rows.length} student(s) from class/section and updated class strength`);
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('❌ Bulk delete error:', {
+        message: error.message,
+        stack: error.stack,
+        requestBody: req.body
+      });
+      
+      // Return detailed error for debugging
+      return ApiResponse.error(res, 
+        `Deletion failed: ${error.message}`, 
+        500,
+        { 
+          error: error.message,
+          requestedIdentifiers: req.body.student_identifiers,
+          context: { class_id, section_id },
+          hint: 'Check server logs for detailed error information'
+        }
+      );
     } finally {
       client.release();
     }

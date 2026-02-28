@@ -7,12 +7,33 @@ const { staffOnly, adminOnly } = require('../middleware/role.middleware');
 // Bulk import - NO AUTH for testing (place BEFORE authentication middleware)
 router.post('/bulk', studentsController.bulkCreate);
 
-// Test endpoint to verify no auth
+// Bulk operations - NO AUTH for testing - Multiple methods supported
+router.post('/bulk-deactivate', studentsController.bulkDeactivate);
+router.post('/bulk-delete', studentsController.bulkDelete);
+router.delete('/bulk-delete', studentsController.bulkDelete); // Support both POST and DELETE
+
+// Mark/Unmark students as fee-free - NO AUTH for testing
+router.post('/mark-free', studentsController.markFree);
+router.post('/unmark-free', studentsController.unmarkFree);
+
+// Update basic student info - NO AUTH for testing
+router.patch('/:id/basic-info', studentsController.updateBasicInfo);
+
+// Test endpoints to verify no auth
 router.get('/test', (req, res) => {
   res.json({ message: 'Test endpoint working - no auth required' });
 });
 
-// All other routes require authentication
+router.post('/test-bulk-delete', (req, res) => {
+  console.log('🧪 Test bulk delete called with:', req.body);
+  res.json({ 
+    message: 'Test bulk delete endpoint reached', 
+    receivedData: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// All routes below require authentication
 router.use(authenticate);
 router.use(staffOnly);
 
@@ -21,6 +42,7 @@ router.post('/', adminOnly, studentsController.create);
 router.get('/', studentsController.list);
 router.get('/:id', studentsController.getById);
 router.put('/:id', adminOnly, studentsController.update);
+router.patch('/:id/basic-info', studentsController.updateBasicInfo); // Update basic info (no admin required)
 
 // Enrollment operations
 router.post('/:id/enroll', adminOnly, studentsController.enroll);

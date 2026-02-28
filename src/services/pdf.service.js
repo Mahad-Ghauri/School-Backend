@@ -9,7 +9,7 @@ const pool = require('../config/db');
  */
 class PDFService {
   constructor() {
-    this.schoolName = 'Muslim School & College';
+    this.schoolName = 'Muslim Public Higher Secondary School Lar';
     this.schoolAddress = 'Main Road, City, Country';
     this.schoolPhone = '+92-300-1234567';
     this.schoolEmail = 'info@muslimschool.edu.pk';
@@ -72,6 +72,124 @@ class PDFService {
          width: 500,
          italic: true
        });
+  }
+
+  /**
+   * Helper: Draw compact voucher (for 4-per-page layout)
+   */
+  drawCompactVoucher(doc, voucherData, x, y, width, height) {
+    const padding = 8;
+    const contentX = x + padding;
+    const contentY = y + padding;
+    const contentWidth = width - (padding * 2);
+    
+    // Draw border
+    doc.rect(x, y, width, height).stroke();
+    
+    // Header
+    doc.fontSize(10)
+       .font('Helvetica-Bold')
+       .text('FEE VOUCHER', contentX, contentY, { width: contentWidth, align: 'center' });
+    
+    doc.fontSize(7)
+       .font('Helvetica')
+       .text(this.schoolName, contentX, contentY + 12, { width: contentWidth, align: 'center' });
+    
+    let currentY = contentY + 24;
+    
+    // Horizontal line
+    doc.moveTo(contentX, currentY)
+       .lineTo(contentX + contentWidth, currentY)
+       .stroke();
+    
+    currentY += 4;
+    
+    // Voucher details in compact format
+    doc.fontSize(7).font('Helvetica');
+    
+    const lineHeight = 10;
+    const labelWidth = 50;
+    const valueX = contentX + labelWidth;
+    
+    // Voucher number if available
+    if (voucherData.voucher_no) {
+      doc.font('Helvetica-Bold').text('Voucher#:', contentX, currentY);
+      doc.font('Helvetica').text(voucherData.voucher_no, valueX, currentY);
+      currentY += lineHeight;
+    }
+    
+    // Student Name
+    doc.font('Helvetica-Bold').text('Student:', contentX, currentY);
+    doc.font('Helvetica').text(voucherData.student_name, valueX, currentY);
+    currentY += lineHeight;
+    
+    // Father Name
+    if (voucherData.father_name) {
+      doc.font('Helvetica-Bold').text('Father:', contentX, currentY);
+      doc.font('Helvetica').text(voucherData.father_name, valueX, currentY);
+      currentY += lineHeight;
+    }
+    
+    // Roll No
+    doc.font('Helvetica-Bold').text('Roll No:', contentX, currentY);
+    doc.font('Helvetica').text(voucherData.roll_no || 'N/A', valueX, currentY);
+    currentY += lineHeight;
+    
+    // Class
+    doc.font('Helvetica-Bold').text('Class:', contentX, currentY);
+    doc.font('Helvetica').text(voucherData.class_name, valueX, currentY);
+    currentY += lineHeight;
+    
+    // Month
+    const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+    doc.font('Helvetica-Bold').text('Month:', contentX, currentY);
+    doc.font('Helvetica').text(monthStr, valueX, currentY);
+    currentY += lineHeight + 2;
+    
+    // Fee items
+    doc.moveTo(contentX, currentY)
+       .lineTo(contentX + contentWidth, currentY)
+       .stroke();
+    currentY += 3;
+    
+    doc.fontSize(6.5).font('Helvetica-Bold');
+    doc.text('Fee Description', contentX, currentY);
+    doc.text('Amount', contentX + contentWidth - 45, currentY);
+    currentY += 9;
+    
+    doc.moveTo(contentX, currentY)
+       .lineTo(contentX + contentWidth, currentY)
+       .stroke();
+    currentY += 3;
+    
+    doc.fontSize(6.5).font('Helvetica');
+    let totalAmount = 0;
+    
+    voucherData.items.forEach(item => {
+      const amount = parseFloat(item.amount);
+      totalAmount += amount;
+      doc.text(item.item_type.replace('_', ' '), contentX, currentY);
+      doc.text(`Rs. ${amount.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+      currentY += 9;
+    });
+    
+    // Total
+    doc.moveTo(contentX, currentY)
+       .lineTo(contentX + contentWidth, currentY)
+       .stroke();
+    currentY += 3;
+    
+    doc.fontSize(7).font('Helvetica-Bold');
+    doc.text('Total Amount:', contentX, currentY);
+    doc.text(`Rs. ${totalAmount.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+    currentY += 11;
+    
+    // Payment instructions
+    doc.fontSize(5.5).font('Helvetica');
+    doc.text('Pay at school office during working hours.', contentX, currentY, { 
+      width: contentWidth, 
+      align: 'center' 
+    });
   }
 
   /**
@@ -159,7 +277,7 @@ class PDFService {
       const voucherResult = await client.query(
         `SELECT 
           v.id, v.month, v.created_at,
-          s.name as student_name, s.roll_no, s.phone,
+          s.name as student_name, s.roll_no, s.phone, s.father_name,
           c.name as class_name, c.class_type,
           sec.name as section_name,
           sch.id as class_history_id
@@ -197,7 +315,7 @@ class PDFService {
       const totalPaid = paymentsResult.rows.reduce((sum, payment) => sum + parseFloat(payment.amount), 0);
       const balance = totalAmount - totalPaid;
 
-      // Create PDF
+      // Create PDF - single voucher centered on page
       const doc = new PDFDocument({ size: 'A4', margin: 50 });
       const filename = `fee-voucher-${voucherId}-${Date.now()}.pdf`;
       const filepath = path.join('/tmp', filename);
@@ -205,96 +323,118 @@ class PDFService {
 
       doc.pipe(stream);
 
-      // Add header
-      this.addHeader(doc, 'FEE VOUCHER');
+      // Draw single voucher centered on page
+      const voucherData = {
+        voucher_no: `V-${String(voucherId).padStart(3, '0')}`,
+        student_name: voucher.student_name,
+        father_name: voucher.father_name,
+        roll_no: voucher.roll_no,
+        class_name: voucher.class_name,
+        section_name: voucher.section_name,
+        month: voucher.month,
+        items: itemsResult.rows.map(item => ({
+          item_type: item.item_type,
+          amount: parseFloat(item.amount)
+        })),
+        total_amount: totalAmount,
+        paid_amount: totalPaid,
+        balance: balance
+      };
 
+      // Header
+      doc.fontSize(20).font('Helvetica-Bold')
+         .text(this.schoolName, { align: 'center' });
+      
+      doc.fontSize(10).font('Helvetica')
+         .text(this.schoolAddress, { align: 'center' })
+         .text(`Phone: ${this.schoolPhone} | Email: ${this.schoolEmail}`, { align: 'center' });
+      
+      doc.moveDown(0.5);
+      doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+      doc.moveDown(0.5);
+      
+      doc.fontSize(16).font('Helvetica-Bold')
+         .text('FEE VOUCHER', { align: 'center' });
+      doc.moveDown(1);
+      
       // Voucher details
-      const monthStr = new Date(voucher.month).toLocaleDateString('en-US', { 
+      const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { 
         month: 'long', 
         year: 'numeric' 
       });
-
-      this.addTwoColumns(
-        doc,
-        {
-          'Voucher No': `FV-${String(voucherId).padStart(6, '0')}`,
-          'Student Name': voucher.student_name,
-          'Roll No': voucher.roll_no || 'N/A'
-        },
-        {
-          'Issue Date': new Date(voucher.created_at).toLocaleDateString(),
-          'Class': `${voucher.class_name} (${voucher.class_type})`,
-          'Section': voucher.section_name
-        },
-        doc.y
-      );
-
-      doc.moveDown(2);
-
-      doc.fontSize(12)
-         .font('Helvetica-Bold')
-         .text(`Fee Month: ${monthStr}`, { align: 'center' });
-
+      
+      doc.fontSize(11).font('Helvetica');
+      let y = doc.y;
+      
+      // Left column
+      doc.font('Helvetica-Bold').text('Student:', 50, y);
+      doc.font('Helvetica').text(voucherData.student_name, 150, y);
+      y += 20;
+      
+      doc.font('Helvetica-Bold').text('Father:', 50, y);
+      doc.font('Helvetica').text(voucherData.father_name || 'N/A', 150, y);
+      y += 20;
+      
+      doc.font('Helvetica-Bold').text('Roll No:', 50, y);
+      doc.font('Helvetica').text(voucherData.roll_no || 'N/A', 150, y);
+      y += 20;
+      
+      // Right column  
+      doc.font('Helvetica-Bold').text('Voucher No:', 320, y - 60);
+      doc.font('Helvetica').text(voucherData.voucher_no, 420, y - 60);
+      
+      doc.font('Helvetica-Bold').text('Class:', 320, y - 40);
+      doc.font('Helvetica').text(voucherData.class_name, 420, y - 40);
+      
+      doc.font('Helvetica-Bold').text('Month:', 320, y - 20);
+      doc.font('Helvetica').text(monthStr, 420, y - 20);
+      
       doc.moveDown(1);
-
+      y = doc.y;
+      
       // Fee items table
-      const tableY = this.createTable(
-        doc,
-        ['Fee Description', 'Amount (Rs.)'],
-        itemsResult.rows.map(item => [
-          item.item_type.replace('_', ' '),
-          parseFloat(item.amount).toFixed(2)
-        ]),
-        doc.y,
-        [350, 150]
-      );
-
-      doc.moveDown(1);
-
-      // Totals
-      const totalsY = tableY + 20;
-      doc.font('Helvetica-Bold').fontSize(11);
+      doc.moveTo(50, y).lineTo(550, y).stroke();
+      y += 10;
       
-      doc.text('Total Amount:', 350, totalsY);
-      doc.text(`Rs. ${totalAmount.toFixed(2)}`, 450, totalsY, { align: 'right', width: 100 });
+      doc.fontSize(12).font('Helvetica-Bold');
+      doc.text('Fee Description', 50, y);
+      doc.text('Amount', 450, y, { width: 100, align: 'right' });
+      y += 20;
       
-      if (totalPaid > 0) {
-        doc.text('Amount Paid:', 350, totalsY + 20);
-        doc.text(`Rs. ${totalPaid.toFixed(2)}`, 450, totalsY + 20, { align: 'right', width: 100 });
-        
-        doc.fontSize(12).fillColor(balance > 0 ? 'red' : 'green');
-        doc.text('Balance:', 350, totalsY + 40);
-        doc.text(`Rs. ${balance.toFixed(2)}`, 450, totalsY + 40, { align: 'right', width: 100 });
-        doc.fillColor('black');
-      }
-
-      doc.moveDown(3);
-
-      // Payment status
-      if (balance === 0) {
-        doc.fontSize(14)
-           .fillColor('green')
-           .font('Helvetica-Bold')
-           .text('✓ PAID IN FULL', { align: 'center' })
-           .fillColor('black');
-      } else {
-        doc.fontSize(12)
-           .fillColor('red')
-           .font('Helvetica-Bold')
-           .text('PAYMENT DUE', { align: 'center' })
-           .fillColor('black');
-      }
-
-      doc.moveDown(1);
-
+      doc.moveTo(50, y).lineTo(550, y).stroke();
+      y += 10;
+      
+      doc.fontSize(11).font('Helvetica');
+      voucherData.items.forEach(item => {
+        doc.text(item.item_type.replace('_', ' '), 50, y);
+        doc.text(`Rs. ${item.amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
+        y += 20;
+      });
+      
+      // Total
+      doc.moveTo(50, y).lineTo(550, y).stroke();
+      y += 10;
+      
+      doc.fontSize(13).font('Helvetica-Bold');
+      doc.text('Total Amount:', 50, y);
+      doc.text(`Rs. ${voucherData.total_amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
+      y += 30;
+      
       // Payment instructions
-      doc.fontSize(9)
-         .font('Helvetica')
-         .text('Payment can be made at the school office during working hours.', { align: 'center' })
-         .text('For bank transfer, please use voucher number as reference.', { align: 'center' });
-
-      // Add footer
-      this.addFooter(doc);
+      doc.fontSize(10).font('Helvetica');
+      doc.text('Payment Instructions:', 50, y);
+      y += 20;
+      doc.fontSize(9);
+      doc.text('• Pay at school office during working hours (8:00 AM - 2:00 PM)', 70, y);
+      y += 15;
+      doc.text('• Late payment may incur additional charges', 70, y);
+      y += 15;
+      doc.text('• Keep this voucher as proof of payment requirement', 70, y);
+      
+      // Footer
+      doc.fontSize(8).font('Helvetica')
+         .text(`Generated on: ${new Date().toLocaleDateString()}`, 50, 750, { align: 'center' })
+         .text('This is a computer-generated document.', 50, 765, { align: 'center', italic: true });
 
       doc.end();
 
@@ -735,84 +875,47 @@ class PDFService {
 
   /**
    * Generate Bulk Fee Vouchers PDF
-   * Generates a single PDF containing multiple fee vouchers
+   * Generates a single PDF containing multiple fee vouchers (4 per page in 2x2 grid)
    */
   async generateBulkFeeVouchers(vouchersData) {
     try {
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+      const doc = new PDFDocument({ size: 'A4', margin: 15 });
       const filename = `bulk-fee-vouchers-${Date.now()}.pdf`;
       const filepath = path.join('/tmp', filename);
       const stream = fs.createWriteStream(filepath);
 
       doc.pipe(stream);
 
-      let isFirstPage = true;
+      // A4 dimensions: 595.28 x 841.89 points
+      // With 15pt margin: usable area is 565.28 x 811.89
+      // Each voucher: 282.64 x 405.945 (width x height) for 2x2 grid
+      const voucherWidth = 282.64;
+      const voucherHeight = 405.945;
+      const startX = 15;
+      const startY = 15;
+      
+      // Grid positions (top-left, top-right, bottom-left, bottom-right)
+      const positions = [
+        { x: startX, y: startY },                                    // Top-left
+        { x: startX + voucherWidth, y: startY },                     // Top-right
+        { x: startX, y: startY + voucherHeight },                    // Bottom-left
+        { x: startX + voucherWidth, y: startY + voucherHeight }      // Bottom-right
+      ];
 
+      let voucherIndex = 0;
+      
       for (const voucherData of vouchersData) {
-        if (!isFirstPage) {
+        // Add new page after every 4 vouchers (except at the start)
+        if (voucherIndex > 0 && voucherIndex % 4 === 0) {
           doc.addPage();
         }
-        isFirstPage = false;
-
-        // Add header
-        this.addHeader(doc, 'FEE VOUCHER');
-
-        // Voucher details
-        const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { 
-          month: 'long', 
-          year: 'numeric' 
-        });
-
-        this.addTwoColumns(
-          doc,
-          {
-            'Student Name': voucherData.student_name,
-            'Roll No': voucherData.roll_no || 'N/A',
-            'Class': `${voucherData.class_name} (${voucherData.class_type})`
-          },
-          {
-            'Section': voucherData.section_name,
-            'Issue Date': new Date().toLocaleDateString(),
-            'Fee Month': monthStr
-          },
-          doc.y
-        );
-
-        doc.moveDown(2);
-
-        // Fee items table
-        const totalAmount = voucherData.items.reduce((sum, item) => sum + item.amount, 0);
-
-        const tableY = this.createTable(
-          doc,
-          ['Fee Description', 'Amount (Rs.)'],
-          voucherData.items.map(item => [
-            item.item_type.replace('_', ' '),
-            parseFloat(item.amount).toFixed(2)
-          ]),
-          doc.y,
-          [350, 150]
-        );
-
-        doc.moveDown(1);
-
-        // Totals
-        const totalsY = tableY + 20;
-        doc.font('Helvetica-Bold').fontSize(12);
         
-        doc.text('Total Amount:', 350, totalsY);
-        doc.text(`Rs. ${totalAmount.toFixed(2)}`, 450, totalsY, { align: 'right', width: 100 });
-
-        doc.moveDown(2);
-
-        // Payment instructions
-        doc.fontSize(9)
-           .font('Helvetica')
-           .text('Payment can be made at the school office during working hours.', { align: 'center' })
-           .text('Please keep this voucher for your records.', { align: 'center' });
-
-        // Add footer
-        this.addFooter(doc);
+        const positionIndex = voucherIndex % 4;
+        const pos = positions[positionIndex];
+        
+        this.drawCompactVoucher(doc, voucherData, pos.x, pos.y, voucherWidth, voucherHeight);
+        
+        voucherIndex++;
       }
 
       doc.end();

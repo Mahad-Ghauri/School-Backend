@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const path = require('path');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
 
 // Import routes
@@ -21,6 +22,7 @@ const analyticsRoutes = require('./routes/analytics.routes');
 const documentsRoutes = require('./routes/documents.routes');
 const discountsRoutes = require('./routes/discounts.routes');
 const studentFeeOverridesRoutes = require('./routes/student-fee-overrides.routes');
+const testReportsRoutes = require('./routes/testReports.routes');
 
 const app = express();
 
@@ -39,6 +41,9 @@ app.use('/api/', limiter);
 // Body parser
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Serve uploaded files statically
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 // Logging
 if (process.env.NODE_ENV === 'development') {
@@ -61,6 +66,34 @@ app.get('/health', (req, res) => {
 const studentsController = require('./controllers/students.controller');
 app.post('/api/students/bulk-noauth', studentsController.bulkCreate);
 
+// Test bulk delete endpoint directly in app.js - NO AUTH
+app.post('/api/test-bulk-delete-direct', (req, res) => {
+  console.log('🧪 Direct bulk delete test called with:', req.body);
+  res.json({ 
+    message: 'Direct bulk delete test endpoint reached', 
+    receivedData: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Bulk delete endpoint - NO AUTH (completely separate from students router)
+app.post('/api/bulk-delete-students', async (req, res, next) => {
+  console.log('🗑️ NO-AUTH bulk delete called with:', req.body);
+  try {
+    await studentsController.bulkDelete(req, res, next);
+  } catch (error) {
+    console.error('❌ Direct bulk delete error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Bulk delete failed: ' + error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Test actual bulk delete without auth
+app.post('/api/students/bulk-delete-noauth', studentsController.bulkDelete);
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentsRoutes);
@@ -77,6 +110,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api', documentsRoutes);
 app.use('/api/discounts', discountsRoutes);
 app.use('/api/student-fee-overrides', studentFeeOverridesRoutes);
+app.use('/api/test-reports', testReportsRoutes);
 
 // 404 handler
 app.use(notFoundHandler);

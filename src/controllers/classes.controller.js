@@ -27,15 +27,15 @@ class ClassesController {
     try {
       const { class_type, name, fee_structure } = req.body;
 
-      // Validate input
+      // Validate input - Only accept integers for fees (no decimal points)
       const schema = Joi.object({
         class_type: Joi.string().valid('SCHOOL', 'COLLEGE').required(),
         name: Joi.string().required(),
         fee_structure: Joi.object({
-          admission_fee: Joi.number().min(0).default(0),
-          monthly_fee: Joi.number().min(0).default(0),
-          paper_fund: Joi.number().min(0).default(0),
-          promotion_fee: Joi.number().min(0).default(0)
+          admission_fee: Joi.number().integer().min(0).default(0),
+          monthly_fee: Joi.number().integer().min(0).default(0),
+          paper_fund: Joi.number().integer().min(0).default(0),
+          promotion_fee: Joi.number().integer().min(0).default(0)
         }).optional()
       });
 
@@ -56,19 +56,18 @@ class ClassesController {
 
       const newClass = classResult.rows[0];
 
-      // Create fee structure if provided
+      // Create fee structure if provided (ensure integers)
       if (fee_structure) {
+        const admissionFee = Math.floor(parseFloat(fee_structure.admission_fee || 0))
+        const monthlyFee = Math.floor(parseFloat(fee_structure.monthly_fee || 0))
+        const paperFund = Math.floor(parseFloat(fee_structure.paper_fund || 0))
+        const promotionFee = Math.floor(parseFloat(fee_structure.promotion_fee || 0))
+        
         await client.query(
           `INSERT INTO class_fee_structure 
            (class_id, effective_from, admission_fee, monthly_fee, paper_fund, promotion_fee) 
            VALUES ($1, CURRENT_DATE, $2, $3, $4, $5)`,
-          [
-            newClass.id,
-            fee_structure.admission_fee || 0,
-            fee_structure.monthly_fee || 0,
-            fee_structure.paper_fund || 0,
-            fee_structure.promotion_fee || 0
-          ]
+          [newClass.id, admissionFee, monthlyFee, paperFund, promotionFee]
         );
       }
 
@@ -311,12 +310,12 @@ class ClassesController {
       const { id } = req.params;
       const { admission_fee, monthly_fee, paper_fund, promotion_fee, effective_from } = req.body;
 
-      // Validate input
+      // Validate input - Only accept integers (no decimal points)
       const schema = Joi.object({
-        admission_fee: Joi.number().min(0).required(),
-        monthly_fee: Joi.number().min(0).required(),
-        paper_fund: Joi.number().min(0).required(),
-        promotion_fee: Joi.number().min(0).default(0),
+        admission_fee: Joi.number().integer().min(0).required(),
+        monthly_fee: Joi.number().integer().min(0).required(),
+        paper_fund: Joi.number().integer().min(0).required(),
+        promotion_fee: Joi.number().integer().min(0).default(0),
         effective_from: Joi.date().optional()
       });
 
@@ -324,6 +323,12 @@ class ClassesController {
       if (error) {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
+
+      // Round values to ensure integers (extra safety)
+      const admissionFee = Math.floor(parseFloat(admission_fee))
+      const monthlyFee = Math.floor(parseFloat(monthly_fee))
+      const paperFund = Math.floor(parseFloat(paper_fund))
+      const promotionFee = Math.floor(parseFloat(promotion_fee || 0))
 
       // Check if class exists
       const classCheck = await client.query(
@@ -335,13 +340,13 @@ class ClassesController {
         return ApiResponse.error(res, 'Class not found', 404);
       }
 
-      // Insert new fee structure
+      // Insert new fee structure with integer values
       const result = await client.query(
         `INSERT INTO class_fee_structure 
          (class_id, effective_from, admission_fee, monthly_fee, paper_fund, promotion_fee) 
          VALUES ($1, $2, $3, $4, $5, $6) 
          RETURNING *`,
-        [id, effective_from || new Date(), admission_fee, monthly_fee, paper_fund, promotion_fee || 0]
+        [id, effective_from || new Date(), admissionFee, monthlyFee, paperFund, promotionFee]
       );
 
       return ApiResponse.success(
@@ -383,11 +388,13 @@ class ClassesController {
   /**
    * Delete class (soft delete by deactivating)
    * DELETE /api/classes/:id
+   * Query params: force=true to delete class with students (will end their class assignments)
    */
   async delete(req, res, next) {
     const client = await pool.connect();
     try {
       const { id } = req.params;
+      const { force } = req.query;
 
       // Check if class has students
       const studentsCheck = await client.query(
@@ -397,11 +404,26 @@ class ClassesController {
         [id]
       );
 
-      if (parseInt(studentsCheck.rows[0].count) > 0) {
+      const studentCount = parseInt(studentsCheck.rows[0].count);
+
+      if (studentCount > 0 && force !== 'true') {
         return ApiResponse.error(
           res,
-          'Cannot delete class with active students. Please deactivate instead.',
-          400
+          `Cannot delete class with ${studentCount} active student(s). Use force=true to delete anyway.`,
+          400,
+          { studentCount }
+        );
+      }
+
+      await client.query('BEGIN');
+
+      // If force delete, end all student class assignments for this class
+      if (studentCount > 0 && force === 'true') {
+        await client.query(
+          `UPDATE student_class_history 
+           SET end_date = CURRENT_DATE 
+           WHERE class_id = $1 AND end_date IS NULL`,
+          [id]
         );
       }
 
@@ -412,11 +434,19 @@ class ClassesController {
       );
 
       if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Class not found', 404);
       }
 
-      return ApiResponse.success(res, result.rows[0], 'Class deactivated successfully');
+      await client.query('COMMIT');
+
+      const message = studentCount > 0 
+        ? `Class deactivated successfully. ${studentCount} student(s) were removed from this class.`
+        : 'Class deactivated successfully';
+
+      return ApiResponse.success(res, result.rows[0], message);
     } catch (error) {
+      await client.query('ROLLBACK');
       next(error);
     } finally {
       client.release();
