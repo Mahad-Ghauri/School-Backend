@@ -180,7 +180,7 @@ class StudentFeeOverridesController {
   async listOverrides(req, res, next) {
     const client = await pool.connect();
     try {
-      const { student_id, class_id, page = 1, limit = 50 } = req.query;
+      const { student_id, class_id, page = 1, limit = 500 } = req.query;
 
       let query = `
         SELECT sfo.*, s.name as student_name, s.roll_no, c.name as class_name, u.email as applied_by_email

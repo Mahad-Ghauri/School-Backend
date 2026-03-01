@@ -25,6 +25,7 @@ class StudentsController {
     this.transfer = this.transfer.bind(this);
     this.promote = this.promote.bind(this);
     this.bulkCreate = this.bulkCreate.bind(this);
+    this.bulkUpdate = this.bulkUpdate.bind(this);
     this.bulkDeactivate = this.bulkDeactivate.bind(this);
     this.bulkDelete = this.bulkDelete.bind(this);
   }
@@ -337,11 +338,12 @@ class StudentsController {
         section_id,
         search,
         page = 1,
-        limit = 50
+        limit = 500  // Increased from 50 to 500 to show all students in a class/section
       } = req.query;
 
       let query = `
-        SELECT s.id, s.name, s.roll_no, s.phone, s.address, s.date_of_birth, 
+        SELECT DISTINCT ON (s.id) 
+               s.id, s.name, s.roll_no, s.phone, s.address, s.date_of_birth, 
                s.bay_form, s.caste, s.previous_school, s.is_expelled, s.is_active, s.created_at,
                s.father_name, s.individual_monthly_fee, s.is_fee_free,
                c.name as current_class_name,
@@ -351,13 +353,17 @@ class StudentsController {
                cfs.admission_fee,
                cfs.paper_fund,
                g.name as father_guardian_name,
-               s.phone as father_contact_number,
                COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee
         FROM students s
         LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
         LEFT JOIN classes c ON sch.class_id = c.id
         LEFT JOIN sections sec ON sch.section_id = sec.id
-        LEFT JOIN class_fee_structure cfs ON c.id = cfs.class_id 
+        LEFT JOIN LATERAL (
+          SELECT * FROM class_fee_structure 
+          WHERE class_id = c.id 
+          ORDER BY effective_from DESC 
+          LIMIT 1
+        ) cfs ON true
         LEFT JOIN student_guardians sg ON s.id = sg.student_id AND sg.relation = 'Father'
         LEFT JOIN guardians g ON sg.guardian_id = g.id
         WHERE 1=1
@@ -441,11 +447,23 @@ class StudentsController {
       const total = parseInt(countResult.rows[0].count);
 
       // Add pagination
-      query += ` ORDER BY s.created_at ASC`; // Order by creation time to put new students at bottom
+      query += ` ORDER BY s.id, s.created_at ASC`; // DISTINCT ON requires s.id first in ORDER BY
       query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
       params.push(limit, (page - 1) * limit);
 
       const result = await client.query(query, params);
+
+      // Debug: Log first student to verify data is correct
+      if (result.rows.length > 0) {
+        console.log('📊 API returning students - first student data:', {
+          id: result.rows[0].id,
+          name: result.rows[0].name,
+          father_name: result.rows[0].father_name,
+          phone: result.rows[0].phone,
+          individual_monthly_fee: result.rows[0].individual_monthly_fee,
+          effective_monthly_fee: result.rows[0].effective_monthly_fee
+        });
+      }
 
       return ApiResponse.paginated(
         res,
@@ -1709,6 +1727,216 @@ class StudentsController {
     } catch (error) {
       await client.query('ROLLBACK');
       console.error('Bulk import error:', error);
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Bulk update existing students with missing data (phone, fee, etc.)
+   * POST /api/students/bulk-update
+   * 
+   * Matches students by name within a class/section and updates their data
+   * CSV format: Sr No, Name, Father Name, Father's Contact Number, Fee
+   */
+  async bulkUpdate(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      console.log('📝 Bulk update request received:', {
+        bodyKeys: Object.keys(req.body),
+        hasStudents: !!req.body.students,
+        studentsCount: Array.isArray(req.body.students) ? req.body.students.length : 0
+      });
+
+      // Handle both formats: { students: [...], class_id, section_id } and { students: [...] }
+      let students = req.body.students || req.body;
+      const classId = parseInt(req.body.class_id) || parseInt(req.body.classId);
+      const sectionId = parseInt(req.body.section_id) || parseInt(req.body.sectionId);
+
+      if (!Array.isArray(students) || students.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Invalid input: expected array of students', 400);
+      }
+
+      // Class ID is now optional - if not provided, search across all classes
+      if (classId) {
+        console.log(`📊 SMART UPDATE: Processing ${students.length} students. Searching across all classes, preferring class ${classId}${sectionId ? `, section ${sectionId}` : ''}`);
+      } else {
+        console.log(`📊 SMART UPDATE: Processing ${students.length} students. Searching across ALL classes and sections`);
+      }
+
+      const updatedStudents = [];
+      const notFoundStudents = [];
+      const errors = [];
+
+      for (let i = 0; i < students.length; i++) {
+        const studentData = students[i];
+        const studentName = studentData.name || '';
+        const srNo = studentData.srNo || studentData.roll_no || '';
+        const fatherName = studentData.fatherName || studentData.father_name || '';
+        const fatherContactNo = studentData.fatherContactNo || studentData.phone || '';
+        const monthlyFee = parseFloat(studentData.monthlyFee || studentData.individual_monthly_fee || studentData.fee) || null;
+
+        // Log first student to see what data is being extracted
+        if (i === 0) {
+          console.log('\ud83d\udce6 FIRST STUDENT DATA EXTRACTION:', {
+            name: studentName,
+            fatherName: fatherName,
+            fatherContactNo: fatherContactNo,
+            monthlyFee: monthlyFee,
+            rawData: studentData
+          });
+        }
+
+        if (!studentName) {
+          errors.push({ row: i + 1, message: 'Missing student name' });
+          continue;
+        }
+
+        // SMART SEARCH: Find student anywhere in the database by name
+        // First try in specified class/section (if provided), then search everywhere
+        let findQuery = `
+          SELECT s.id, s.name, s.roll_no, s.phone, s.father_name, s.individual_monthly_fee,
+                 sch.class_id, sch.section_id, c.name as class_name, sec.name as section_name
+          FROM students s
+          JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+          JOIN classes c ON sch.class_id = c.id
+          JOIN sections sec ON sch.section_id = sec.id
+          WHERE s.is_active = true
+            AND LOWER(TRIM(s.name)) = LOWER(TRIM($1))
+        `;
+        let findParams = [studentName];
+
+        // If class/section provided, prefer students in that class (but don't restrict to it)
+        if (classId) {
+          findQuery += ` ORDER BY CASE WHEN sch.class_id = $2 THEN 0 ELSE 1 END`;
+          findParams.push(classId);
+          if (sectionId) {
+            findQuery += `, CASE WHEN sch.section_id = $3 THEN 0 ELSE 1 END`;
+            findParams.push(sectionId);
+          }
+        }
+        findQuery += ` LIMIT 1`;
+
+        const findResult = await client.query(findQuery, findParams);
+
+        if (findResult.rows.length === 0) {
+          notFoundStudents.push({
+            row: i + 1,
+            name: studentName,
+            srNo: srNo,
+            fatherName: fatherName
+          });
+          continue;
+        }
+
+        const existingStudent = findResult.rows[0];
+
+        // Build update query - only update fields that are provided AND different
+        const updates = [];
+        const updateParams = [];
+        let paramIndex = 1;
+
+        // Update father_name if provided and different
+        if (fatherName && fatherName !== existingStudent.father_name) {
+          updates.push(`father_name = $${paramIndex++}`);
+          updateParams.push(fatherName);
+        }
+
+        // Update phone if provided and different
+        if (fatherContactNo && fatherContactNo !== existingStudent.phone) {
+          updates.push(`phone = $${paramIndex++}`);
+          updateParams.push(fatherContactNo);
+          if (i === 0) console.log(`\u260e\ufe0f Updating phone: "${existingStudent.phone}" \u2192 "${fatherContactNo}"`);
+        }
+
+        // Update individual_monthly_fee if provided and different
+        if (monthlyFee !== null && monthlyFee !== parseFloat(existingStudent.individual_monthly_fee)) {
+          updates.push(`individual_monthly_fee = $${paramIndex++}`);
+          updateParams.push(monthlyFee);
+          if (i === 0) console.log(`\ud83d\udcb5 Updating fee: "${existingStudent.individual_monthly_fee}" \u2192 "${monthlyFee}"`);
+        }
+
+        // Update roll_no if provided and different
+        if (srNo && srNo !== existingStudent.roll_no) {
+          // Format roll_no with leading zeros
+          const formattedRollNo = String(srNo).padStart(3, '0');
+          if (formattedRollNo !== existingStudent.roll_no) {
+            updates.push(`roll_no = $${paramIndex++}`);
+            updateParams.push(formattedRollNo);
+          }
+        }
+
+        if (updates.length === 0) {
+          // No updates needed, but still count as processed
+          updatedStudents.push({
+            id: existingStudent.id,
+            name: existingStudent.name,
+            class_name: existingStudent.class_name,
+            section_name: existingStudent.section_name,
+            status: 'no_changes'
+          });
+          continue;
+        }
+
+        // Perform the update
+        updateParams.push(existingStudent.id);
+        const updateQuery = `
+          UPDATE students 
+          SET ${updates.join(', ')}
+          WHERE id = $${paramIndex}
+          RETURNING id, name, roll_no, phone, father_name, individual_monthly_fee
+        `;
+
+        const updateResult = await client.query(updateQuery, updateParams);
+        
+        if (i === 0 || i === students.length - 1) {
+          console.log(`✅ Updated student ${existingStudent.name} in ${existingStudent.class_name} - ${existingStudent.section_name}:`, updateResult.rows[0]);
+        }
+
+        updatedStudents.push({
+          id: updateResult.rows[0].id,
+          name: updateResult.rows[0].name,
+          roll_no: updateResult.rows[0].roll_no,
+          phone: updateResult.rows[0].phone,
+          father_name: updateResult.rows[0].father_name,
+          individual_monthly_fee: updateResult.rows[0].individual_monthly_fee,
+          class_name: existingStudent.class_name,
+          section_name: existingStudent.section_name,
+          status: 'updated'
+        });
+      }
+
+      await client.query('COMMIT');
+
+      const actuallyUpdated = updatedStudents.filter(s => s.status === 'updated').length;
+      const noChanges = updatedStudents.filter(s => s.status === 'no_changes').length;
+
+      console.log(`📊 Bulk update complete:`, {
+        total: students.length,
+        updated: actuallyUpdated,
+        noChanges: noChanges,
+        notFound: notFoundStudents.length,
+        errors: errors.length
+      });
+
+      return ApiResponse.success(res, {
+        totalProcessed: students.length,
+        updatedCount: actuallyUpdated,
+        noChangesCount: noChanges,
+        notFoundCount: notFoundStudents.length,
+        errorCount: errors.length,
+        updatedStudents: updatedStudents.filter(s => s.status === 'updated'),
+        notFoundStudents: notFoundStudents,
+        errors: errors.length > 0 ? errors : undefined
+      }, `Successfully updated ${actuallyUpdated} student(s). ${notFoundStudents.length} not found.`);
+
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Bulk update error:', error);
       next(error);
     } finally {
       client.release();

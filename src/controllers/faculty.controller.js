@@ -174,7 +174,7 @@ class FacultyController {
         role,
         search,
         page = 1,
-        limit = 50
+        limit = 500
       } = req.query;
 
       let query = `

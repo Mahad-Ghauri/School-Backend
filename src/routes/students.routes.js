@@ -6,6 +6,7 @@ const { staffOnly, adminOnly } = require('../middleware/role.middleware');
 
 // Bulk import - NO AUTH for testing (place BEFORE authentication middleware)
 router.post('/bulk', studentsController.bulkCreate);
+router.post('/bulk-update', studentsController.bulkUpdate); // Update existing students with missing data
 
 // Bulk operations - NO AUTH for testing - Multiple methods supported
 router.post('/bulk-deactivate', studentsController.bulkDeactivate);

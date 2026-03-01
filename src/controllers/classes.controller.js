@@ -165,7 +165,7 @@ class ClassesController {
         class_type,
         is_active = true,
         page = 1,
-        limit = 50
+        limit = 500
       } = req.query;
 
       let query = `

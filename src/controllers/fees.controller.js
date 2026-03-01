@@ -307,6 +307,7 @@ class FeesController {
           s.name as student_name,
           s.roll_no,
           s.phone,
+          s.father_name,
           c.id as class_id,
           c.name as class_name,
           sec.id as section_id,
@@ -346,7 +347,7 @@ class FeesController {
       }
 
       query += ` 
-        GROUP BY s.id, s.name, s.roll_no, s.phone, c.id, c.name, sec.id, sec.name
+        GROUP BY s.id, s.name, s.roll_no, s.phone, s.father_name, c.id, c.name, sec.id, sec.name
         HAVING SUM(vi.amount) > COALESCE(SUM(p.amount), 0)
       `;
 
@@ -364,7 +365,7 @@ class FeesController {
       const defaultersWithGuardians = await Promise.all(
         result.rows.map(async (defaulter) => {
           const guardians = await client.query(
-            `SELECT g.name, g.phone 
+            `SELECT g.name, g.phone, sg.relation 
              FROM guardians g
              JOIN student_guardians sg ON g.id = sg.guardian_id
              WHERE sg.student_id = $1`,

@@ -22,7 +22,7 @@ class DiscountsController {
     async create(req, res, next) {
         const client = await pool.connect();
         try {
-            const { student_id, class_id, discount_type, discount_value, reason } = req.body;
+            const { student_id, class_id, discount_type, discount_value, reason, is_permanent, for_month, is_fee_free } = req.body;
 
             // Validate input
             const schema = Joi.object({
@@ -30,7 +30,10 @@ class DiscountsController {
                 class_id: Joi.number().integer().required(),
                 discount_type: Joi.string().valid('PERCENTAGE', 'FLAT').required(),
                 discount_value: Joi.number().min(0).required(),
-                reason: Joi.string().optional().allow('', null)
+                reason: Joi.string().optional().allow('', null),
+                is_permanent: Joi.boolean().optional().default(true),
+                for_month: Joi.date().optional().allow(null),
+                is_fee_free: Joi.boolean().optional().default(false)
             });
 
             const { error } = schema.validate(req.body);
@@ -45,7 +48,8 @@ class DiscountsController {
 
             // Check if student exists and is enrolled in the class
             const enrollmentCheck = await client.query(
-                `SELECT sch.id FROM student_class_history sch
+                `SELECT sch.id, s.id as student_id FROM student_class_history sch
+         JOIN students s ON sch.student_id = s.id
          WHERE sch.student_id = $1 AND sch.class_id = $2 AND sch.end_date IS NULL`,
                 [student_id, class_id]
             );
@@ -54,23 +58,52 @@ class DiscountsController {
                 return ApiResponse.error(res, 'Student is not currently enrolled in this class', 400);
             }
 
-            // Insert or update discount
-            const result = await client.query(
-                `INSERT INTO student_discounts 
-         (student_id, class_id, discount_type, discount_value, reason, applied_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (student_id, class_id) 
-         DO UPDATE SET 
-           discount_type = EXCLUDED.discount_type,
-           discount_value = EXCLUDED.discount_value,
-           reason = EXCLUDED.reason,
-           applied_by = EXCLUDED.applied_by,
-           created_at = now()
-         RETURNING *`,
-                [student_id, class_id, discount_type, discount_value, reason || null, req.user?.id || null]
-            );
+            // Handle fee-free status
+            if (is_fee_free === true) {
+                await client.query(
+                    `UPDATE students SET is_fee_free = true WHERE id = $1`,
+                    [student_id]
+                );
+                return ApiResponse.success(res, { student_id, is_fee_free: true }, 'Student marked as fee-free. No vouchers will be generated.');
+            } else if (is_fee_free === false) {
+                await client.query(
+                    `UPDATE students SET is_fee_free = false WHERE id = $1`,
+                    [student_id]
+                );
+                return ApiResponse.success(res, { student_id, is_fee_free: false }, 'Student unmarked as fee-free. Vouchers will be generated normally.');
+            }
 
-            return ApiResponse.created(res, result.rows[0], 'Discount applied successfully');
+            // Insert or update discount (permanent or temporary)
+            // For permanent discounts, store in student_discounts table
+            // For one-time/monthly discounts, we'll need to handle differently
+            if (is_permanent === true || is_permanent === undefined) {
+                const result = await client.query(
+                    `INSERT INTO student_discounts 
+             (student_id, class_id, discount_type, discount_value, reason, applied_by)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (student_id, class_id) 
+             DO UPDATE SET 
+               discount_type = EXCLUDED.discount_type,
+               discount_value = EXCLUDED.discount_value,
+               reason = EXCLUDED.reason,
+               applied_by = EXCLUDED.applied_by,
+               created_at = now()
+             RETURNING *`,
+                    [student_id, class_id, discount_type, discount_value, reason || null, req.user?.id || null]
+                );
+                return ApiResponse.created(res, result.rows[0], 'Permanent discount applied successfully');
+            } else {
+                // For one-time discounts (for a specific month), return data for frontend to apply manually
+                return ApiResponse.success(res, {
+                    student_id,
+                    class_id,
+                    discount_type,
+                    discount_value,
+                    for_month,
+                    reason,
+                    is_permanent: false
+                }, 'One-time discount data prepared. Apply to specific voucher.');
+            }
         } catch (error) {
             next(error);
         } finally {

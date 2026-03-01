@@ -130,7 +130,7 @@ class SectionsController {
   async list(req, res, next) {
     const client = await pool.connect();
     try {
-      const { class_id, page = 1, limit = 50 } = req.query;
+      const { class_id, page = 1, limit = 500 } = req.query;
 
       let query = `
         SELECT s.*, 

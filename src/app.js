@@ -65,6 +65,7 @@ app.get('/health', (req, res) => {
 // Bulk import - NO AUTH - placed before all route middleware
 const studentsController = require('./controllers/students.controller');
 app.post('/api/students/bulk-noauth', studentsController.bulkCreate);
+app.post('/api/students/bulk-update-noauth', studentsController.bulkUpdate); // Update existing students
 
 // Test bulk delete endpoint directly in app.js - NO AUTH
 app.post('/api/test-bulk-delete-direct', (req, res) => {
