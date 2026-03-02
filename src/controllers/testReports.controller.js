@@ -108,7 +108,7 @@ class TestReportsController {
       const { class_id, section_id, start_date, end_date } = req.query;
 
       let query = `
-        SELECT tr.*, c.name as class_name, s.name as section_name, u.name as uploaded_by_name
+        SELECT tr.*, c.name as class_name, s.name as section_name, u.email as uploaded_by_email
         FROM test_reports tr
         LEFT JOIN classes c ON tr.class_id = c.id
         LEFT JOIN sections s ON tr.section_id = s.id
@@ -165,7 +165,7 @@ class TestReportsController {
       const { id } = req.params;
 
       const result = await client.query(
-        `SELECT tr.*, c.name as class_name, s.name as section_name, u.name as uploaded_by_name
+        `SELECT tr.*, c.name as class_name, s.name as section_name, u.email as uploaded_by_email
          FROM test_reports tr
          LEFT JOIN classes c ON tr.class_id = c.id
          LEFT JOIN sections s ON tr.section_id = s.id
