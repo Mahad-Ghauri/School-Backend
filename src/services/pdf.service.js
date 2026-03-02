@@ -130,6 +130,11 @@ class PDFService {
       currentY += lineHeight;
     }
     
+    // Father Phone
+    doc.font('Helvetica-Bold').text('F.Contact:', contentX, currentY);
+    doc.font('Helvetica').text(voucherData.father_phone || 'Not Submitted', valueX, currentY);
+    currentY += lineHeight;
+    
     // Roll No
     doc.font('Helvetica-Bold').text('Roll No:', contentX, currentY);
     doc.font('Helvetica').text(voucherData.roll_no || 'N/A', valueX, currentY);
@@ -321,7 +326,7 @@ class PDFService {
       const voucherResult = await client.query(
         `SELECT 
           v.id, v.month, v.created_at,
-          s.name as student_name, s.roll_no, s.phone, s.father_name,
+          s.name as student_name, s.roll_no, NULLIF(TRIM(s.phone), '') as father_phone, s.father_name,
           c.name as class_name, c.class_type,
           sec.name as section_name,
           sch.id as class_history_id
@@ -372,6 +377,7 @@ class PDFService {
         voucher_no: `V-${String(voucherId).padStart(3, '0')}`,
         student_name: voucher.student_name,
         father_name: voucher.father_name,
+        father_phone: voucher.father_phone,
         roll_no: voucher.roll_no,
         class_name: voucher.class_name,
         section_name: voucher.section_name,
@@ -417,6 +423,10 @@ class PDFService {
       
       doc.font('Helvetica-Bold').text('Father:', 50, y);
       doc.font('Helvetica').text(voucherData.father_name || 'N/A', 150, y);
+      y += 20;
+      
+      doc.font('Helvetica-Bold').text('F.Contact:', 50, y);
+      doc.font('Helvetica').text(voucherData.father_phone || 'Not Submitted', 150, y);
       y += 20;
       
       doc.font('Helvetica-Bold').text('Roll No:', 50, y);

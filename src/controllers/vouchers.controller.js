@@ -689,6 +689,8 @@ class VouchersController {
                v.created_at,
                s.id as student_id,
                s.name as student_name,
+               s.father_name,
+               NULLIF(TRIM(s.phone), '') as father_phone,
                s.roll_no,
                c.id as class_id,
                c.name as class_name,
@@ -755,7 +757,7 @@ class VouchersController {
         paramCount++;
       }
 
-      query += ` GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.roll_no, c.id, c.name, sec.id, sec.name`;
+      query += ` GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, s.phone, s.roll_no, c.id, c.name, sec.id, sec.name`;
 
       // Apply status filter after grouping
       if (status) {
@@ -838,8 +840,9 @@ class VouchersController {
               v.created_at,
               s.id as student_id,
               s.name as student_name,
+              s.father_name,
               s.roll_no,
-              s.phone as student_phone,
+              NULLIF(TRIM(s.phone), '') as father_phone,
               c.id as class_id,
               c.name as class_name,
               sec.id as section_id,
@@ -872,7 +875,7 @@ class VouchersController {
        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
        LEFT JOIN PaymentTotal pt ON v.id = pt.voucher_id
        WHERE v.id = $1
-       GROUP BY v.id, v.month, v.due_date, v.created_at, s.id, s.name, s.roll_no, s.phone, 
+       GROUP BY v.id, v.month, v.due_date, v.created_at, s.id, s.name, s.father_name, s.roll_no, s.phone, 
                 c.id, c.name, sec.id, sec.name, pt.paid_amount`,
       [voucherId]
     );
@@ -1124,7 +1127,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section (exclude fee-free students)
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, s.is_bulk_imported, s.father_name, s.individual_monthly_fee
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, NULLIF(TRIM(s.phone), '') as father_phone, s.is_bulk_imported, s.father_name, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -1312,6 +1315,7 @@ class VouchersController {
           student_id: student.student_id,
           student_name: student.student_name,
           father_name: student.father_name,
+          father_phone: student.father_phone,
           roll_no: student.roll_no,
           items: feeItems,
           total_amount: totalAmount,
@@ -1393,7 +1397,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, s.father_name, s.individual_monthly_fee
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, NULLIF(TRIM(s.phone), '') as father_phone, s.father_name, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -1538,6 +1542,7 @@ class VouchersController {
         vouchersData.push({
           student_name: student.student_name,
           father_name: student.father_name,
+          father_phone: student.father_phone,
           roll_no: student.roll_no,
           class_name: classInfo.rows[0].class_name,
           class_type: classInfo.rows[0].class_type,
@@ -1602,6 +1607,7 @@ class VouchersController {
           s.id as student_id,
           s.name as student_name,
           s.father_name,
+          NULLIF(TRIM(s.phone), '') as father_phone,
           s.roll_no,
           c.name as class_name,
           sec.name as section_name,
@@ -1625,7 +1631,7 @@ class VouchersController {
           GROUP BY voucher_id
         ) p ON v.id = p.voucher_id
         WHERE v.id = ANY($1::int[])
-        GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, 
+        GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, s.phone,
                  s.roll_no, c.name, sec.name
         ORDER BY c.name, s.roll_no, s.name
       `;
@@ -1642,6 +1648,7 @@ class VouchersController {
         voucher_no: `V-${row.id}`, // Generate voucher number from ID
         student_name: row.student_name,
         father_name: row.father_name,
+        father_phone: row.father_phone,
         roll_no: row.roll_no,
         class_name: row.class_name,
         section_name: row.section_name,
