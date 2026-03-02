@@ -129,7 +129,7 @@ class StudentsController {
           gender || null,
           enrollment ? enrollment.start_date : new Date().toISOString().split('T')[0],
           is_fee_free || false,
-          individual_monthly_fee || null
+          individual_monthly_fee ?? null  // Use ?? to preserve 0 for free students
         ]
       );
 
