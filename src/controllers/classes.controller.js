@@ -16,6 +16,8 @@ class ClassesController {
     this.delete = this.delete.bind(this);
     this.updateFeeStructure = this.updateFeeStructure.bind(this);
     this.getFeeHistory = this.getFeeHistory.bind(this);
+    this.updateSingleFeeStructure = this.updateSingleFeeStructure.bind(this);
+    this.deleteFeeStructure = this.deleteFeeStructure.bind(this);
   }
 
   /**
@@ -395,6 +397,84 @@ class ClassesController {
       );
 
       return ApiResponse.success(res, result.rows);
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Update a specific fee structure entry by ID
+   * PUT /api/classes/:id/fee-structure/:feeId
+   */
+  async updateSingleFeeStructure(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { id, feeId } = req.params;
+      const { effective_from, admission_fee, monthly_fee, paper_fund, promotion_fee } = req.body;
+
+      // Validate the fee structure belongs to this class
+      const checkResult = await client.query(
+        'SELECT * FROM class_fee_structure WHERE id = $1 AND class_id = $2',
+        [feeId, id]
+      );
+
+      if (checkResult.rows.length === 0) {
+        return ApiResponse.error(res, 'Fee structure not found', 404);
+      }
+
+      // Update the fee structure (ensure integers)
+      const result = await client.query(
+        `UPDATE class_fee_structure 
+         SET effective_from = $1, admission_fee = $2, monthly_fee = $3, paper_fund = $4, promotion_fee = $5
+         WHERE id = $6 AND class_id = $7
+         RETURNING *`,
+        [
+          effective_from || checkResult.rows[0].effective_from,
+          Math.floor(parseFloat(admission_fee) || 0),
+          Math.floor(parseFloat(monthly_fee) || 0),
+          Math.floor(parseFloat(paper_fund) || 0),
+          Math.floor(parseFloat(promotion_fee) || 0),
+          feeId,
+          id
+        ]
+      );
+
+      return ApiResponse.success(res, result.rows[0], 'Fee structure updated successfully');
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Delete a specific fee structure entry by ID
+   * DELETE /api/classes/:id/fee-structure/:feeId
+   */
+  async deleteFeeStructure(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { id, feeId } = req.params;
+
+      // Validate the fee structure belongs to this class
+      const checkResult = await client.query(
+        'SELECT * FROM class_fee_structure WHERE id = $1 AND class_id = $2',
+        [feeId, id]
+      );
+
+      if (checkResult.rows.length === 0) {
+        return ApiResponse.error(res, 'Fee structure not found', 404);
+      }
+
+      // Delete the fee structure
+      await client.query(
+        'DELETE FROM class_fee_structure WHERE id = $1 AND class_id = $2',
+        [feeId, id]
+      );
+
+      return ApiResponse.success(res, null, 'Fee structure deleted successfully');
     } catch (error) {
       next(error);
     } finally {

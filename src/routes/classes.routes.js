@@ -18,5 +18,7 @@ router.delete('/:id', adminOnly, classesController.delete);
 // Fee structure management
 router.put('/:id/fee-structure', adminOnly, classesController.updateFeeStructure);
 router.get('/:id/fee-history', classesController.getFeeHistory);
+router.put('/:id/fee-structure/:feeId', adminOnly, classesController.updateSingleFeeStructure);
+router.delete('/:id/fee-structure/:feeId', adminOnly, classesController.deleteFeeStructure);
 
 module.exports = router;
