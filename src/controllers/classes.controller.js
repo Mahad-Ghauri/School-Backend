@@ -209,9 +209,16 @@ class ClassesController {
 
       const result = await client.query(query, params);
 
+      console.log('=== CLASSES CONTROLLER DEBUG ===');
+      console.log('Number of classes found:', result.rows.length);
+      if (result.rows.length > 0) {
+        console.log('First class:', result.rows[0].id, result.rows[0].name);
+      }
+
       // Get fee structure for each class
       const classesWithFees = await Promise.all(
         result.rows.map(async (classData) => {
+          console.log(`Fetching fee structure for class ${classData.id} (${classData.name})`);
           const feeResult = await client.query(
             `SELECT * FROM class_fee_structure 
              WHERE class_id = $1 
@@ -219,12 +226,22 @@ class ClassesController {
              LIMIT 1`,
             [classData.id]
           );
+          console.log(`Fee result for class ${classData.id}:`, feeResult.rows[0]);
           return {
             ...classData,
             current_fee_structure: feeResult.rows[0] || null
           };
         })
       );
+
+      console.log('=== CLASSES WITH FEES ===');
+      if (classesWithFees.length > 0) {
+        console.log('First class with fees:', {
+          id: classesWithFees[0].id,
+          name: classesWithFees[0].name,
+          current_fee_structure: classesWithFees[0].current_fee_structure
+        });
+      }
 
       return ApiResponse.paginated(
         res,

@@ -46,16 +46,24 @@ class DiscountsController {
                 return ApiResponse.error(res, 'Percentage discount cannot exceed 100%', 400);
             }
 
-            // Check if student exists and is enrolled in the class
-            const enrollmentCheck = await client.query(
-                `SELECT sch.id, s.id as student_id FROM student_class_history sch
-         JOIN students s ON sch.student_id = s.id
-         WHERE sch.student_id = $1 AND sch.class_id = $2 AND sch.end_date IS NULL`,
-                [student_id, class_id]
+            // Check if student exists (remove strict enrollment validation)
+            const studentCheck = await client.query(
+                `SELECT id, name FROM students WHERE id = $1`,
+                [student_id]
             );
 
-            if (enrollmentCheck.rows.length === 0) {
-                return ApiResponse.error(res, 'Student is not currently enrolled in this class', 400);
+            if (studentCheck.rows.length === 0) {
+                return ApiResponse.error(res, 'Student not found', 400);
+            }
+
+            // Check if class exists  
+            const classCheck = await client.query(
+                `SELECT id FROM classes WHERE id = $1`,
+                [class_id]
+            );
+
+            if (classCheck.rows.length === 0) {
+                return ApiResponse.error(res, 'Class not found', 400);
             }
 
             // Handle fee-free status

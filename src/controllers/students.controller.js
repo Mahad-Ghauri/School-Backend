@@ -40,8 +40,9 @@ class StudentsController {
       await client.query('BEGIN');
 
       const {
-        name, roll_no, phone, address, date_of_birth,
-        bay_form, caste, previous_school,
+        name, roll_no, phone, address, email, date_of_birth,
+        bay_form, caste, previous_school, father_name, mother_name,
+        is_fee_free,
         guardians,
         enrollment // { class_id, section_id, start_date }
       } = req.body;
@@ -52,10 +53,14 @@ class StudentsController {
         roll_no: Joi.string().optional().allow('', null),
         phone: Joi.string().optional().allow('', null),
         address: Joi.string().optional().allow('', null),
+        email: Joi.string().email().optional().allow('', null),
         date_of_birth: Joi.date().optional().allow(null),
         bay_form: Joi.string().optional().allow('', null),
         caste: Joi.string().optional().allow('', null),
         previous_school: Joi.string().optional().allow('', null),
+        father_name: Joi.string().optional().allow('', null),
+        mother_name: Joi.string().optional().allow('', null),
+        is_fee_free: Joi.boolean().optional().default(false),
         guardians: Joi.array().items(
           Joi.object({
             guardian_id: Joi.number().optional(),
@@ -119,18 +124,23 @@ class StudentsController {
       // Insert student
       const studentResult = await client.query(
         `INSERT INTO students 
-         (name, roll_no, phone, address, date_of_birth, bay_form, caste, previous_school) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+         (name, roll_no, phone, address, email, date_of_birth, bay_form, caste, previous_school, father_name, mother_name, admission_date, is_fee_free) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
          RETURNING *`,
         [
           name,
           roll_no || null,
           phone || null,
           address || null,
+          email || null,
           date_of_birth || null,
           bay_form || null,
           caste || null,
-          previous_school || null
+          previous_school || null,
+          father_name || null,
+          mother_name || null,
+          enrollment ? enrollment.start_date : new Date().toISOString().split('T')[0],
+          is_fee_free || false
         ]
       );
 
@@ -208,15 +218,19 @@ class StudentsController {
 
       // Handle enrollment if provided
       if (enrollment) {
+        // Get next serial number for this section
+        const serialNumber = await this.getNextSerialNumber(client, enrollment.section_id);
+        
         await client.query(
           `INSERT INTO student_class_history 
-           (student_id, class_id, section_id, start_date) 
-           VALUES ($1, $2, $3, $4)`,
+           (student_id, class_id, section_id, start_date, serial_number) 
+           VALUES ($1, $2, $3, $4, $5)`,
           [
             student.id,
             enrollment.class_id,
             enrollment.section_id,
-            enrollment.start_date || new Date()
+            enrollment.start_date || new Date(),
+            serialNumber
           ]
         );
       }
@@ -231,6 +245,19 @@ class StudentsController {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Helper: Get next serial number for section
+   */
+  async getNextSerialNumber(client, sectionId) {
+    const result = await client.query(
+      `SELECT COALESCE(MAX(serial_number), 0) + 1 as next_serial
+       FROM student_class_history 
+       WHERE section_id = $1 AND end_date IS NULL`,
+      [sectionId]
+    );
+    return result.rows[0].next_serial;
   }
 
   /**
@@ -346,8 +373,10 @@ class StudentsController {
                s.id, s.name, s.roll_no, s.phone, s.address, s.date_of_birth, 
                s.bay_form, s.caste, s.previous_school, s.is_expelled, s.is_active, s.created_at,
                s.father_name, s.individual_monthly_fee, s.is_fee_free,
+               c.id as class_id,
                c.name as current_class_name,
                c.class_type,
+               sec.id as section_id,
                sec.name as current_section_name,
                cfs.monthly_fee as class_monthly_fee,
                cfs.admission_fee,
@@ -458,6 +487,10 @@ class StudentsController {
         console.log('📊 API returning students - first student data:', {
           id: result.rows[0].id,
           name: result.rows[0].name,
+          class_id: result.rows[0].class_id,
+          current_class_name: result.rows[0].current_class_name,
+          section_id: result.rows[0].section_id,
+          current_section_name: result.rows[0].current_section_name,
           father_name: result.rows[0].father_name,
           phone: result.rows[0].phone,
           individual_monthly_fee: result.rows[0].individual_monthly_fee,
@@ -906,11 +939,14 @@ class StudentsController {
       }
 
       // Create enrollment
+      // Get next serial number for this section
+      const serialNumber = await this.getNextSerialNumber(client, section_id);
+      
       await client.query(
         `INSERT INTO student_class_history 
-         (student_id, class_id, section_id, start_date) 
-         VALUES ($1, $2, $3, $4)`,
-        [id, class_id, section_id, start_date || new Date()]
+         (student_id, class_id, section_id, start_date, serial_number) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, class_id, section_id, start_date || new Date(), serialNumber]
       );
 
       await client.query('COMMIT');
@@ -1290,11 +1326,14 @@ class StudentsController {
       }
 
       // Create new enrollment
+      // Get next serial number for new section
+      const serialNumber = await this.getNextSerialNumber(client, section_id);
+      
       await client.query(
         `INSERT INTO student_class_history 
-         (student_id, class_id, section_id, start_date) 
-         VALUES ($1, $2, $3, $4)`,
-        [id, class_id, section_id, transferDateValue]
+         (student_id, class_id, section_id, start_date, serial_number) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, class_id, section_id, transferDateValue, serialNumber]
       );
 
       await client.query('COMMIT');
@@ -1417,11 +1456,14 @@ class StudentsController {
       }
 
       // Create new enrollment
+      // Get next serial number for new section
+      const serialNumber = await this.getNextSerialNumber(client, section_id);
+      
       await client.query(
         `INSERT INTO student_class_history 
-         (student_id, class_id, section_id, start_date) 
-         VALUES ($1, $2, $3, $4)`,
-        [id, class_id, section_id, promotionDateValue]
+         (student_id, class_id, section_id, start_date, serial_number) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [id, class_id, section_id, promotionDateValue, serialNumber]
       );
 
       // Handle discount reset if requested
@@ -1706,11 +1748,14 @@ class StudentsController {
         const newStudent = insertResult.rows[0];
         insertedStudents.push(newStudent);
 
-        // Enroll in the target class
+        // Enroll in the target class with auto-assigned serial number
+        // Get next serial number for this section
+        const serialNumber = await this.getNextSerialNumber(client, targetSectionId);
+        
         await client.query(
-          `INSERT INTO student_class_history (student_id, class_id, section_id, start_date)
-           VALUES ($1, $2, $3, $4)`,
-          [newStudent.id, targetClassId, targetSectionId, student.admission_date || new Date()]
+          `INSERT INTO student_class_history (student_id, class_id, section_id, start_date, serial_number)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [newStudent.id, targetClassId, targetSectionId, student.admission_date || new Date(), serialNumber]
         );
       }
 
