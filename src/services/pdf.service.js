@@ -190,6 +190,50 @@ class PDFService {
       width: contentWidth, 
       align: 'center' 
     });
+    
+    // Add "PAID" watermark if voucher is fully paid
+    if (voucherData.paid_amount && voucherData.paid_amount >= totalAmount) {
+      doc.save();
+      
+      // Calculate center position for the watermark
+      const centerX = x + (width / 2);
+      const centerY = y + (height / 2);
+      
+      // Rotate and add PAID text
+      doc.translate(centerX, centerY)
+         .rotate(-35, { origin: [0, 0] });
+      
+      // Draw background rectangle for PAID stamp
+      doc.fontSize(28)
+         .font('Helvetica-Bold');
+      
+      const textWidth = doc.widthOfString('PAID');
+      const textHeight = 35;
+      const rectPadding = 8;
+      
+      // Semi-transparent green background
+      doc.rect(
+        -textWidth / 2 - rectPadding,
+        -textHeight / 2 - rectPadding / 2,
+        textWidth + rectPadding * 2,
+        textHeight + rectPadding
+      )
+      .lineWidth(2)
+      .fillOpacity(0.15)
+      .fill('#10b981')
+      .strokeOpacity(0.6)
+      .stroke('#059669');
+      
+      // PAID text in green
+      doc.fillOpacity(0.5)
+         .fillColor('#059669')
+         .text('PAID', -textWidth / 2, -textHeight / 2 + 5, {
+           width: textWidth,
+           align: 'center'
+         });
+      
+      doc.restore();
+    }
   }
 
   /**
@@ -435,6 +479,52 @@ class PDFService {
       doc.fontSize(8).font('Helvetica')
          .text(`Generated on: ${new Date().toLocaleDateString()}`, 50, 750, { align: 'center' })
          .text('This is a computer-generated document.', 50, 765, { align: 'center', italic: true });
+
+      // Add "PAID" watermark if voucher is fully paid
+      if (voucherData.paid_amount >= voucherData.total_amount) {
+        doc.save();
+        
+        // Position watermark in center of page
+        const pageWidth = 595.28; // A4 width in points
+        const pageHeight = 841.89; // A4 height in points
+        const centerX = pageWidth / 2;
+        const centerY = pageHeight / 2;
+        
+        // Rotate and add PAID text
+        doc.translate(centerX, centerY)
+           .rotate(-45, { origin: [0, 0] });
+        
+        // Draw PAID stamp with border
+        doc.fontSize(80)
+           .font('Helvetica-Bold');
+        
+        const textWidth = doc.widthOfString('PAID');
+        const textHeight = 90;
+        const rectPadding = 20;
+        
+        // Semi-transparent green background rectangle
+        doc.rect(
+          -textWidth / 2 - rectPadding,
+          -textHeight / 2 - rectPadding / 2,
+          textWidth + rectPadding * 2,
+          textHeight + rectPadding
+        )
+        .lineWidth(4)
+        .fillOpacity(0.1)
+        .fill('#10b981')
+        .strokeOpacity(0.4)
+        .stroke('#059669');
+        
+        // PAID text in green
+        doc.fillOpacity(0.3)
+           .fillColor('#059669')
+           .text('PAID', -textWidth / 2, -textHeight / 2 + 10, {
+             width: textWidth,
+             align: 'center'
+           });
+        
+        doc.restore();
+      }
 
       doc.end();
 
