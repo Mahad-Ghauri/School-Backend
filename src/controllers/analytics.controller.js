@@ -294,40 +294,48 @@ class AnalyticsController {
   /**
    * Class-wise fee collection analysis
    * GET /api/analytics/class-collection
+   * Returns real classes with aggregated fee collection data
    */
   async classCollection(req, res, next) {
     const client = await pool.connect();
     try {
+      // Get all classes with aggregated fee collection data
       const result = await client.query(`
-        WITH class_payments AS (
+        WITH voucher_data AS (
           SELECT 
+            sch.class_id,
             v.id as voucher_id,
-            c.id as class_id,
-            c.name as class_name,
             SUM(vi.amount) as voucher_amount,
-            COALESCE((SELECT SUM(amount) FROM fee_payments WHERE voucher_id = v.id), 0) as paid_amount
-          FROM classes c
-          LEFT JOIN student_class_history sch ON c.id = sch.class_id AND sch.end_date IS NULL
+            v.status,
+            COALESCE(
+              (SELECT SUM(fp.amount) 
+               FROM fee_payments fp 
+               WHERE fp.voucher_id = v.id), 
+              0
+            ) as paid_amount
+          FROM student_class_history sch
           LEFT JOIN fee_vouchers v ON sch.id = v.student_class_history_id
           LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-          GROUP BY v.id, c.id, c.name
+          WHERE sch.end_date IS NULL
+          GROUP BY sch.class_id, v.id, v.status
         )
         SELECT 
-          class_id,
-          class_name,
-          COUNT(DISTINCT voucher_id) as total_vouchers,
-          COALESCE(SUM(voucher_amount), 0) as total_fee_generated,
-          COALESCE(SUM(paid_amount), 0) as total_collected,
-          COALESCE(SUM(voucher_amount - paid_amount), 0) as total_pending,
+          c.id as class_id,
+          c.name as class_name,
+          COUNT(DISTINCT vd.voucher_id) FILTER (WHERE vd.voucher_id IS NOT NULL) as total_vouchers,
+          COALESCE(SUM(vd.voucher_amount), 0) as total_generated,
+          COALESCE(SUM(vd.paid_amount), 0) as total_collected,
+          COALESCE(SUM(vd.voucher_amount - vd.paid_amount), 0) as total_pending,
           CASE 
-            WHEN SUM(voucher_amount) > 0 
-            THEN ROUND((SUM(paid_amount) / SUM(voucher_amount) * 100)::numeric, 2)
+            WHEN SUM(vd.voucher_amount) > 0 
+            THEN ROUND((SUM(vd.paid_amount) / SUM(vd.voucher_amount) * 100)::numeric, 1)
             ELSE 0 
           END as collection_rate
-        FROM class_payments
-        WHERE class_id IS NOT NULL
-        GROUP BY class_id, class_name
-        ORDER BY total_collected DESC
+        FROM classes c
+        LEFT JOIN voucher_data vd ON c.id = vd.class_id
+        GROUP BY c.id, c.name
+        HAVING c.id IS NOT NULL
+        ORDER BY c.id
       `);
 
       return ApiResponse.success(res, result.rows);
