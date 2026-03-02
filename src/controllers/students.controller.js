@@ -43,6 +43,7 @@ class StudentsController {
         name, phone, address, email, date_of_birth,
         bay_form, caste, previous_school, father_name, gender,
         is_fee_free,
+        individual_monthly_fee,
         guardians,
         enrollment // { class_id, section_id, start_date }
       } = req.body;
@@ -60,6 +61,7 @@ class StudentsController {
         father_name: Joi.string().optional().allow('', null),
         gender: Joi.string().valid('Male', 'Female', 'Other').optional().allow('', null),
         is_fee_free: Joi.boolean().optional().default(false),
+        individual_monthly_fee: Joi.number().optional().allow(null),
         guardians: Joi.array().items(
           Joi.object({
             guardian_id: Joi.number().optional(),
@@ -111,8 +113,8 @@ class StudentsController {
       // Insert student
       const studentResult = await client.query(
         `INSERT INTO students 
-         (name, phone, address, email, date_of_birth, bay_form, caste, previous_school, father_name, gender, admission_date, is_fee_free) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
+         (name, phone, address, email, date_of_birth, bay_form, caste, previous_school, father_name, gender, admission_date, is_fee_free, individual_monthly_fee) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
          RETURNING *`,
         [
           name,
@@ -126,7 +128,8 @@ class StudentsController {
           father_name || null,
           gender || null,
           enrollment ? enrollment.start_date : new Date().toISOString().split('T')[0],
-          is_fee_free || false
+          is_fee_free || false,
+          individual_monthly_fee || null
         ]
       );
 
