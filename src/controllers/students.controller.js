@@ -40,8 +40,8 @@ class StudentsController {
       await client.query('BEGIN');
 
       const {
-        name, roll_no, phone, address, email, date_of_birth,
-        bay_form, caste, previous_school, father_name, mother_name,
+        name, phone, address, email, date_of_birth,
+        bay_form, caste, previous_school, father_name, gender,
         is_fee_free,
         guardians,
         enrollment // { class_id, section_id, start_date }
@@ -50,7 +50,6 @@ class StudentsController {
       // Validate input
       const schema = Joi.object({
         name: Joi.string().required(),
-        roll_no: Joi.string().optional().allow('', null),
         phone: Joi.string().optional().allow('', null),
         address: Joi.string().optional().allow('', null),
         email: Joi.string().email().optional().allow('', null),
@@ -59,7 +58,7 @@ class StudentsController {
         caste: Joi.string().optional().allow('', null),
         previous_school: Joi.string().optional().allow('', null),
         father_name: Joi.string().optional().allow('', null),
-        mother_name: Joi.string().optional().allow('', null),
+        gender: Joi.string().valid('Male', 'Female', 'Other').optional().allow('', null),
         is_fee_free: Joi.boolean().optional().default(false),
         guardians: Joi.array().items(
           Joi.object({
@@ -82,18 +81,6 @@ class StudentsController {
       if (error) {
         await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
-      }
-
-      // Check if roll_no is unique (if provided)
-      if (roll_no) {
-        const rollNoCheck = await client.query(
-          'SELECT id FROM students WHERE roll_no = $1',
-          [roll_no]
-        );
-        if (rollNoCheck.rows.length > 0) {
-          await client.query('ROLLBACK');
-          return ApiResponse.error(res, 'Roll number already exists', 409);
-        }
       }
 
       // Validate enrollment if provided
@@ -124,12 +111,11 @@ class StudentsController {
       // Insert student
       const studentResult = await client.query(
         `INSERT INTO students 
-         (name, roll_no, phone, address, email, date_of_birth, bay_form, caste, previous_school, father_name, mother_name, admission_date, is_fee_free) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) 
+         (name, phone, address, email, date_of_birth, bay_form, caste, previous_school, father_name, gender, admission_date, is_fee_free) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) 
          RETURNING *`,
         [
           name,
-          roll_no || null,
           phone || null,
           address || null,
           email || null,
@@ -138,7 +124,7 @@ class StudentsController {
           caste || null,
           previous_school || null,
           father_name || null,
-          mother_name || null,
+          gender || null,
           enrollment ? enrollment.start_date : new Date().toISOString().split('T')[0],
           is_fee_free || false
         ]
