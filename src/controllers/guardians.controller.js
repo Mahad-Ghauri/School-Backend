@@ -289,19 +289,11 @@ class GuardiansController {
     try {
       const { id } = req.params;
 
-      // Check if guardian has students
-      const studentsCheck = await client.query(
-        'SELECT COUNT(*) as count FROM student_guardians WHERE guardian_id = $1',
+      // Remove student-guardian associations first
+      await client.query(
+        'DELETE FROM student_guardians WHERE guardian_id = $1',
         [id]
       );
-
-      if (parseInt(studentsCheck.rows[0].count) > 0) {
-        return ApiResponse.error(
-          res,
-          'Cannot delete guardian who has associated students. Please remove student associations first.',
-          400
-        );
-      }
 
       const result = await client.query(
         'DELETE FROM guardians WHERE id = $1 RETURNING *',
