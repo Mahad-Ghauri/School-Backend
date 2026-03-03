@@ -500,6 +500,165 @@ class AnalyticsController {
   }
 
   /**
+   * Financial Summary for Accounts Overview
+   * GET /api/analytics/financial-summary
+   * Query: startDate, endDate
+   */
+  async financialSummary(req, res, next) {
+    const client = await pool.connect();
+    try {
+      let { startDate, endDate } = req.query;
+      
+      // Default to current month if no dates provided
+      if (!startDate || !endDate) {
+        const now = new Date();
+        startDate = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
+        endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
+      }
+
+      // 1. Total Collection (fee payments in date range)
+      const collectionResult = await client.query(`
+        SELECT COALESCE(SUM(amount), 0) as total_collection
+        FROM fee_payments
+        WHERE payment_date >= $1 AND payment_date <= $2
+      `, [startDate, endDate]);
+
+      // 2. Total Expenses (expenses + salary payments in date range)
+      const expenseResult = await client.query(`
+        SELECT COALESCE(SUM(amount), 0) as total_expenses
+        FROM expenses
+        WHERE expense_date >= $1 AND expense_date <= $2
+      `, [startDate, endDate]);
+
+      const salaryExpenseResult = await client.query(`
+        SELECT COALESCE(SUM(amount), 0) as total_salary_expenses
+        FROM salary_payments
+        WHERE payment_date >= $1 AND payment_date <= $2
+      `, [startDate, endDate]);
+
+      const totalCollection = parseFloat(collectionResult.rows[0].total_collection);
+      const totalExpenses = parseFloat(expenseResult.rows[0].total_expenses) + parseFloat(salaryExpenseResult.rows[0].total_salary_expenses);
+      const netBalance = totalCollection - totalExpenses;
+
+      // 3. Monthly breakdown for bar chart (income vs expenses)
+      const monthlyBreakdown = await client.query(`
+        WITH date_range AS (
+          SELECT generate_series(
+            DATE_TRUNC('month', $1::date),
+            DATE_TRUNC('month', $2::date),
+            '1 month'::interval
+          ) as month
+        )
+        SELECT 
+          TO_CHAR(dr.month, 'Mon YYYY') as label,
+          TO_CHAR(dr.month, 'YYYY-MM') as month_key,
+          COALESCE((
+            SELECT SUM(fp.amount)
+            FROM fee_payments fp
+            WHERE DATE_TRUNC('month', fp.payment_date) = dr.month
+              AND fp.payment_date >= $1 AND fp.payment_date <= $2
+          ), 0) as income,
+          COALESCE((
+            SELECT SUM(e.amount)
+            FROM expenses e
+            WHERE DATE_TRUNC('month', e.expense_date) = dr.month
+              AND e.expense_date >= $1 AND e.expense_date <= $2
+          ), 0) + COALESCE((
+            SELECT SUM(sp.amount)
+            FROM salary_payments sp
+            WHERE DATE_TRUNC('month', sp.payment_date) = dr.month
+              AND sp.payment_date >= $1 AND sp.payment_date <= $2
+          ), 0) as expenses
+        FROM date_range dr
+        ORDER BY dr.month ASC
+      `, [startDate, endDate]);
+
+      // 4. Expense distribution by title (for pie chart)
+      const expenseDistribution = await client.query(`
+        (
+          SELECT title as category, SUM(amount) as total
+          FROM expenses
+          WHERE expense_date >= $1 AND expense_date <= $2
+          GROUP BY title
+        )
+        UNION ALL
+        (
+          SELECT 'Salaries' as category, COALESCE(SUM(amount), 0) as total
+          FROM salary_payments
+          WHERE payment_date >= $1 AND payment_date <= $2
+        )
+        ORDER BY total DESC
+      `, [startDate, endDate]);
+
+      // 5. Collection matrix - month-by-month expected vs actual
+      const collectionMatrix = await client.query(`
+        WITH date_range AS (
+          SELECT generate_series(
+            DATE_TRUNC('month', $1::date),
+            DATE_TRUNC('month', $2::date),
+            '1 month'::interval
+          ) as month
+        )
+        SELECT 
+          TO_CHAR(dr.month, 'Mon YYYY') as label,
+          TO_CHAR(dr.month, 'YYYY-MM') as month_key,
+          COALESCE((
+            SELECT SUM(vi.amount)
+            FROM fee_voucher_items vi
+            JOIN fee_vouchers v ON vi.voucher_id = v.id
+            WHERE DATE_TRUNC('month', v.month) = dr.month
+          ), 0) as expected,
+          COALESCE((
+            SELECT SUM(fp.amount)
+            FROM fee_payments fp
+            WHERE DATE_TRUNC('month', fp.payment_date) = dr.month
+              AND fp.payment_date >= $1 AND fp.payment_date <= $2
+          ), 0) as actual,
+          CASE 
+            WHEN COALESCE((
+              SELECT SUM(vi.amount)
+              FROM fee_voucher_items vi
+              JOIN fee_vouchers v ON vi.voucher_id = v.id
+              WHERE DATE_TRUNC('month', v.month) = dr.month
+            ), 0) > 0 
+            THEN ROUND(
+              COALESCE((
+                SELECT SUM(fp.amount)
+                FROM fee_payments fp
+                WHERE DATE_TRUNC('month', fp.payment_date) = dr.month
+                  AND fp.payment_date >= $1 AND fp.payment_date <= $2
+              ), 0) * 100.0 / 
+              COALESCE((
+                SELECT SUM(vi.amount)
+                FROM fee_voucher_items vi
+                JOIN fee_vouchers v ON vi.voucher_id = v.id
+                WHERE DATE_TRUNC('month', v.month) = dr.month
+              ), 1), 1
+            )
+            ELSE 0
+          END as collection_rate
+        FROM date_range dr
+        ORDER BY dr.month ASC
+      `, [startDate, endDate]);
+
+      return ApiResponse.success(res, {
+        summary: {
+          total_collection: totalCollection,
+          total_expenses: totalExpenses,
+          net_balance: netBalance,
+        },
+        monthly_breakdown: monthlyBreakdown.rows,
+        expense_distribution: expenseDistribution.rows.filter(r => parseFloat(r.total) > 0),
+        collection_matrix: collectionMatrix.rows,
+      });
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Performance metrics
    * GET /api/analytics/performance
    */

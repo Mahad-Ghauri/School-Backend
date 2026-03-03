@@ -50,4 +50,11 @@ router.get('/expense-analysis', staffOnly, analyticsController.expenseAnalysis);
  */
 router.get('/performance', staffOnly, analyticsController.performanceMetrics);
 
+/**
+ * Financial summary for Accounts Overview
+ * GET /api/analytics/financial-summary
+ * Query: startDate, endDate
+ */
+router.get('/financial-summary', staffOnly, analyticsController.financialSummary);
+
 module.exports = router;

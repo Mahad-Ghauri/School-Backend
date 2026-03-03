@@ -10,8 +10,8 @@ router.use(authenticate);
 /**
  * Payment Routes
  */
-// Record payment (admin only)
-router.post('/payment', adminOnly, feesController.recordPayment);
+// Record payment (admin and accountant)
+router.post('/payment', staffOnly, feesController.recordPayment);
 
 // List all payments (staff can view)
 router.get('/payments', staffOnly, feesController.listPayments);

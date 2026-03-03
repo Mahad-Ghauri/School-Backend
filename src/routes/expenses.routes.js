@@ -16,10 +16,10 @@ router.get('/top', staffOnly, expensesController.getTopExpenses);
 router.post('/bulk', adminOnly, expensesController.bulkCreate);
 
 // CRUD operations
-router.post('/', adminOnly, expensesController.create);
+router.post('/', staffOnly, expensesController.create);
 router.get('/', staffOnly, expensesController.list);
 router.get('/:id', staffOnly, expensesController.getById);
-router.put('/:id', adminOnly, expensesController.update);
+router.put('/:id', staffOnly, expensesController.update);
 router.delete('/:id', adminOnly, expensesController.delete);
 
 module.exports = router;
