@@ -669,7 +669,7 @@ class VouchersController {
         from_date,
         to_date,
         page = 1,
-        limit = 50
+        limit
       } = req.query;
 
       // Handle month/year parameters - convert to date format
@@ -780,19 +780,32 @@ class VouchersController {
       const countResult = await client.query(countQuery, params);
       const total = parseInt(countResult.rows[0].count);
 
-      // Add pagination
+      // Add ordering and optional pagination
       query += ` ORDER BY s.roll_no, v.month DESC`;
-      query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
-      params.push(limit, (page - 1) * limit);
 
-      const result = await client.query(query, params);
-
-      return ApiResponse.paginated(
-        res,
-        result.rows,
-        { page: parseInt(page), limit: parseInt(limit), total },
-        'Vouchers retrieved successfully'
-      );
+      let result;
+      if (limit) {
+        const limitNum = parseInt(limit);
+        const offsetNum = (parseInt(page) - 1) * limitNum;
+        query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+        params.push(limitNum, offsetNum);
+        result = await client.query(query, params);
+        return ApiResponse.paginated(
+          res,
+          result.rows,
+          { page: parseInt(page), limit: limitNum, total },
+          'Vouchers retrieved successfully'
+        );
+      } else {
+        // No limit specified - return all vouchers
+        result = await client.query(query, params);
+        return ApiResponse.paginated(
+          res,
+          result.rows,
+          { page: 1, limit: result.rows.length || 1, total },
+          'Vouchers retrieved successfully'
+        );
+      }
     } catch (error) {
       next(error);
     } finally {
