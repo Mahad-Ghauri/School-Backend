@@ -9,10 +9,10 @@ const pool = require('../config/db');
  */
 class PDFService {
   constructor() {
-    this.schoolName = 'Muslim Public Higher Secondary School Lar';
-    this.schoolAddress = 'Main Road, City, Country';
-    this.schoolPhone = '+92-300-1234567';
-    this.schoolEmail = 'info@muslimschool.edu.pk';
+    this.schoolName = 'Muslim Public Higher Secondary School';
+    this.schoolAddress = 'Bahawalpur Road, Adda Laar';
+    this.schoolPhone = '0300-6246297';
+    this.schoolEmail = 'muslimpublichighersecondarysch@gmail.com';
   }
 
   /**
