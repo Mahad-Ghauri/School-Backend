@@ -187,7 +187,23 @@ class PDFService {
     doc.fontSize(7).font('Helvetica-Bold');
     doc.text('Total Amount:', contentX, currentY);
     doc.text(`Rs. ${totalAmount.toFixed(0)}`, contentX + contentWidth - 45, currentY);
-    currentY += 11;
+    currentY += 10;
+
+    // Show paid/pending for partial payments
+    const paidAmt = parseFloat(voucherData.paid_amount) || 0;
+    if (paidAmt > 0 && paidAmt < totalAmount) {
+      const pendingAmt = totalAmount - paidAmt;
+      doc.fontSize(6.5).font('Helvetica-Bold');
+      doc.fillColor('#059669').text('Paid:', contentX, currentY);
+      doc.text(`Rs. ${paidAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+      currentY += 9;
+      doc.fillColor('#dc2626').text('Pending:', contentX, currentY);
+      doc.text(`Rs. ${pendingAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+      currentY += 9;
+      doc.fillColor('#000000');
+    } else {
+      currentY += 1;
+    }
     
     // Payment instructions
     doc.fontSize(5.5).font('Helvetica');
@@ -472,8 +488,22 @@ class PDFService {
       doc.fontSize(13).font('Helvetica-Bold');
       doc.text('Total Amount:', 50, y);
       doc.text(`Rs. ${voucherData.total_amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
-      y += 30;
-      
+      y += 25;
+
+      // Show paid/pending for partial payments
+      if (voucherData.paid_amount > 0 && voucherData.paid_amount < voucherData.total_amount) {
+        const pendingAmount = voucherData.total_amount - voucherData.paid_amount;
+        doc.fontSize(11).font('Helvetica-Bold');
+        doc.fillColor('#059669').text('Paid Amount:', 50, y);
+        doc.text(`Rs. ${voucherData.paid_amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
+        y += 20;
+        doc.fillColor('#dc2626').text('Pending Amount:', 50, y);
+        doc.text(`Rs. ${pendingAmount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
+        y += 20;
+        doc.fillColor('#000000');
+      }
+      y += 5;
+
       // Payment instructions
       doc.fontSize(10).font('Helvetica');
       doc.text('Payment Instructions:', 50, y);
