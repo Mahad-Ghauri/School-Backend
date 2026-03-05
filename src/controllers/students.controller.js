@@ -28,6 +28,7 @@ class StudentsController {
     this.bulkUpdate = this.bulkUpdate.bind(this);
     this.bulkDeactivate = this.bulkDeactivate.bind(this);
     this.bulkDelete = this.bulkDelete.bind(this);
+    this.deleteOne = this.deleteOne.bind(this);
   }
 
   /**
@@ -1365,31 +1366,9 @@ class StudentsController {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
-      // Check for arrears (unless forced)
-      if (!force) {
-        const arrearsResult = await client.query(
-          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
-           FROM fee_vouchers v
-           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-           LEFT JOIN (
-             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
-           ) p ON v.id = p.voucher_id
-           JOIN student_class_history sch ON v.student_class_history_id = sch.id
-           WHERE sch.student_id = $1`,
-          [id]
-        );
-
-        const totalDue = parseFloat(arrearsResult.rows[0].total_due) || 0;
-        if (totalDue > 0) {
-          await client.query('ROLLBACK');
-          return ApiResponse.error(
-            res,
-            `Cannot promote student with outstanding dues of ${totalDue}. Use force=true to override.`,
-            400,
-            { due_amount: totalDue }
-          );
-        }
-      }
+      // Outstanding dues are carried forward automatically: when the first
+      // voucher is generated in the new class, the voucher engine detects
+      // unpaid amounts across ALL class history entries and adds them as ARREARS.
 
       // Get current enrollment
       const activeEnrollment = await client.query(
@@ -1468,6 +1447,102 @@ class StudentsController {
       const updatedStudent = await this.getStudentById(client, id);
 
       return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Note: Generate the first voucher for the new class to apply promotion/admission fees.');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Permanently delete a single student and all related records
+   * DELETE /api/students/:id
+   */
+  async deleteOne(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { id } = req.params;
+
+      // Check student exists
+      const check = await client.query(
+        'SELECT id, name FROM students WHERE id = $1',
+        [id]
+      );
+      if (check.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Student not found', 404);
+      }
+
+      const studentName = check.rows[0].name;
+
+      // Capture active enrollment section for strength update
+      const enrollmentInfo = await client.query(
+        `SELECT section_id, class_id FROM student_class_history
+         WHERE student_id = $1 AND end_date IS NULL`,
+        [id]
+      );
+
+      // Delete in foreign-key-safe order
+      const steps = [
+        {
+          name: 'fee_payments',
+          query: `DELETE FROM fee_payments WHERE voucher_id IN (
+            SELECT fv.id FROM fee_vouchers fv
+            WHERE fv.student_class_history_id IN (
+              SELECT sch.id FROM student_class_history sch WHERE sch.student_id = $1
+            )
+          )`
+        },
+        {
+          name: 'fee_voucher_items',
+          query: `DELETE FROM fee_voucher_items WHERE voucher_id IN (
+            SELECT fv.id FROM fee_vouchers fv
+            WHERE fv.student_class_history_id IN (
+              SELECT sch.id FROM student_class_history sch WHERE sch.student_id = $1
+            )
+          )`
+        },
+        {
+          name: 'fee_vouchers',
+          query: `DELETE FROM fee_vouchers WHERE student_class_history_id IN (
+            SELECT sch.id FROM student_class_history sch WHERE sch.student_id = $1
+          )`
+        },
+        { name: 'student_fee_overrides', query: 'DELETE FROM student_fee_overrides WHERE student_id = $1', optional: true },
+        { name: 'student_discounts',     query: 'DELETE FROM student_discounts WHERE student_id = $1',     optional: true },
+        { name: 'student_class_history', query: 'DELETE FROM student_class_history WHERE student_id = $1' },
+      ];
+
+      for (const step of steps) {
+        try {
+          await client.query(step.query, [id]);
+        } catch (err) {
+          if (!step.optional) throw err;
+        }
+      }
+
+      // Delete the student record (cascades to student_guardians, student_documents)
+      await client.query('DELETE FROM students WHERE id = $1', [id]);
+
+      // Update section strength if student was actively enrolled
+      if (enrollmentInfo.rows.length > 0) {
+        const { section_id } = enrollmentInfo.rows[0];
+        await client.query(
+          'UPDATE sections SET current_strength = GREATEST(0, current_strength - 1) WHERE id = $1',
+          [section_id]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      return ApiResponse.success(
+        res,
+        { deletedId: id, name: studentName },
+        `Student "${studentName}" permanently deleted`
+      );
     } catch (error) {
       await client.query('ROLLBACK');
       next(error);

@@ -13,6 +13,9 @@ router.post('/bulk-deactivate', studentsController.bulkDeactivate);
 router.post('/bulk-delete', studentsController.bulkDelete);
 router.delete('/bulk-delete', studentsController.bulkDelete); // Support both POST and DELETE
 
+// Individual permanent delete - NO AUTH (consistent with bulk-delete pattern)
+router.delete('/:id', studentsController.deleteOne);
+
 // Mark/Unmark students as fee-free - NO AUTH for testing
 router.post('/mark-free', studentsController.markFree);
 router.post('/unmark-free', studentsController.unmarkFree);
