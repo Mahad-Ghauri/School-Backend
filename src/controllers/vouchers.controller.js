@@ -862,7 +862,8 @@ class VouchersController {
               sec.name as section_name,
               json_agg(json_build_object(
                 'item_type', vi.item_type,
-                'amount', vi.amount
+                'amount', vi.amount,
+                'description', vi.description
               )) as items,
               (SELECT json_agg(json_build_object(
                 'id', p.id,
@@ -912,10 +913,11 @@ class VouchersController {
       const schema = Joi.object({
         items: Joi.array().items(
           Joi.object({
-            item_type: Joi.string().required(),
-            amount: Joi.number().required()
+            item_type: Joi.string().valid('MONTHLY','ADMISSION','PAPER_FUND','TRANSPORT','DISCOUNT','ARREARS','CUSTOM').required(),
+            amount: Joi.number().min(0).required(),
+            description: Joi.string().optional().allow('', null)
           })
-        ).required()
+        ).min(1).required()
       });
 
       const { error } = schema.validate(req.body);
@@ -954,11 +956,19 @@ class VouchersController {
 
       // Insert new items
       for (const item of items) {
-        await client.query(
-          `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
-           VALUES ($1, $2, $3)`,
-          [id, item.item_type, item.amount]
-        );
+        if (item.description && item.item_type === 'CUSTOM') {
+          await client.query(
+            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+             VALUES ($1, $2, $3, $4)`,
+            [id, item.item_type, item.amount, item.description]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+             VALUES ($1, $2, $3)`,
+            [id, item.item_type, item.amount]
+          );
+        }
       }
 
       await client.query('COMMIT');
