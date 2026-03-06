@@ -920,7 +920,7 @@ class VouchersController {
         ).min(1).required()
       });
 
-      const { error } = schema.validate(req.body);
+      const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
