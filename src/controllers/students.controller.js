@@ -29,6 +29,7 @@ class StudentsController {
     this.bulkDeactivate = this.bulkDeactivate.bind(this);
     this.bulkDelete = this.bulkDelete.bind(this);
     this.deleteOne = this.deleteOne.bind(this);
+    this.setYearlyPackage = this.setYearlyPackage.bind(this);
   }
 
   /**
@@ -640,6 +641,100 @@ class StudentsController {
 
       return ApiResponse.success(res, updatedStudent, 'Student updated successfully');
     } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Set yearly package for a college student
+   * POST /api/students/:id/yearly-package
+   * Creates or updates the YEARLY_COLLEGE voucher
+   */
+  async setYearlyPackage(req, res, next) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const { id } = req.params;
+      const { yearly_package_amount } = req.body;
+
+      const schema = Joi.object({
+        yearly_package_amount: Joi.number().positive().required()
+      });
+      const { error } = schema.validate(req.body);
+      if (error) {
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Get current enrollment
+      const enrollmentResult = await client.query(
+        `SELECT sch.id as enrollment_id, sch.class_id, c.class_type, s.is_active
+         FROM student_class_history sch
+         JOIN classes c ON sch.class_id = c.id
+         JOIN students s ON sch.student_id = s.id
+         WHERE sch.student_id = $1 AND sch.end_date IS NULL`,
+        [id]
+      );
+
+      if (enrollmentResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Student is not currently enrolled', 404);
+      }
+
+      const enrollment = enrollmentResult.rows[0];
+
+      if (enrollment.class_type !== 'COLLEGE') {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Yearly package is only for college students', 400);
+      }
+
+      if (!enrollment.is_active) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Student is not active', 400);
+      }
+
+      // Check if a YEARLY_COLLEGE voucher already exists
+      const existingVoucher = await client.query(
+        `SELECT fv.id as voucher_id
+         FROM fee_vouchers fv
+         WHERE fv.student_class_history_id = $1 AND fv.voucher_type = 'YEARLY_COLLEGE'`,
+        [enrollment.enrollment_id]
+      );
+
+      if (existingVoucher.rows.length > 0) {
+        // Update existing voucher item amount
+        await client.query(
+          `UPDATE fee_voucher_items SET amount = $1
+           WHERE voucher_id = $2 AND item_type = 'YEARLY_PACKAGE'`,
+          [parseFloat(yearly_package_amount), existingVoucher.rows[0].voucher_id]
+        );
+        await client.query('COMMIT');
+        return ApiResponse.success(res, { voucher_id: existingVoucher.rows[0].voucher_id }, 'Yearly package updated successfully');
+      }
+
+      // Create new YEARLY_COLLEGE voucher
+      const now = new Date();
+      const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`;
+
+      const voucherResult = await client.query(
+        `INSERT INTO fee_vouchers (student_class_history_id, month, voucher_type)
+         VALUES ($1, $2, 'YEARLY_COLLEGE')
+         RETURNING *`,
+        [enrollment.enrollment_id, month]
+      );
+
+      await client.query(
+        `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+         VALUES ($1, 'YEARLY_PACKAGE', $2, 'Annual Fee Package')`,
+        [voucherResult.rows[0].id, parseFloat(yearly_package_amount)]
+      );
+
+      await client.query('COMMIT');
+      return ApiResponse.created(res, { voucher_id: voucherResult.rows[0].id }, 'Yearly package voucher created successfully');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
       next(error);
     } finally {
       client.release();

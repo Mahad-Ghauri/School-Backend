@@ -54,6 +54,9 @@ router.post('/:id/withdraw', adminOnly, studentsController.withdraw);
 router.post('/:id/transfer', adminOnly, studentsController.transfer);
 router.post('/:id/promote', adminOnly, studentsController.promote);
 
+// Yearly package for college students
+router.post('/:id/yearly-package', adminOnly, studentsController.setYearlyPackage);
+
 // Status management
 router.post('/:id/activate', adminOnly, studentsController.activate);
 router.post('/:id/deactivate', adminOnly, studentsController.deactivate);
