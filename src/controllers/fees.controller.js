@@ -317,10 +317,11 @@ class FeesController {
           COALESCE(SUM(p.amount), 0) as paid_amount,
           SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount
         FROM students s
-        JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
-        JOIN classes c ON sch.class_id = c.id
-        JOIN sections sec ON sch.section_id = sec.id
-        JOIN fee_vouchers v ON sch.id = v.student_class_history_id
+        JOIN student_class_history sch_curr ON s.id = sch_curr.student_id AND sch_curr.end_date IS NULL
+        JOIN classes c ON sch_curr.class_id = c.id
+        JOIN sections sec ON sch_curr.section_id = sec.id
+        JOIN student_class_history sch_all ON s.id = sch_all.student_id
+        JOIN fee_vouchers v ON sch_all.id = v.student_class_history_id
         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
         LEFT JOIN fee_payments p ON v.id = p.voucher_id
         WHERE s.is_active = true
@@ -330,13 +331,13 @@ class FeesController {
       let paramCount = 1;
 
       if (class_id) {
-        query += ` AND c.id = $${paramCount}`;
+        query += ` AND sch_curr.class_id = $${paramCount}`;
         params.push(class_id);
         paramCount++;
       }
 
       if (section_id) {
-        query += ` AND sec.id = $${paramCount}`;
+        query += ` AND sch_curr.section_id = $${paramCount}`;
         params.push(section_id);
         paramCount++;
       }
@@ -481,7 +482,7 @@ class FeesController {
           COUNT(v.id) as unpaid_vouchers,
           COALESCE(SUM(vi.amount) - SUM(p.amount), SUM(vi.amount), 0) as total_due
          FROM students s
-         JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+         JOIN student_class_history sch ON s.id = sch.student_id
          JOIN fee_vouchers v ON sch.id = v.student_class_history_id
          JOIN fee_voucher_items vi ON v.id = vi.voucher_id
          LEFT JOIN fee_payments p ON v.id = p.voucher_id
