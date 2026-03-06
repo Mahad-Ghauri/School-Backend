@@ -475,24 +475,35 @@ class FeesController {
       const { id } = req.params;
 
       const result = await client.query(
-        `SELECT 
-          s.id as student_id,
-          s.name as student_name,
-          s.roll_no,
-          COUNT(v.id) as unpaid_vouchers,
-          COALESCE(SUM(vi.amount) - SUM(p.amount), SUM(vi.amount), 0) as total_due
+        `WITH VouchersDue AS (
+           SELECT 
+             v.id as voucher_id,
+             SUM(vi.amount) as voucher_total,
+             COALESCE(SUM(p.amount), 0) as voucher_paid,
+             SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as voucher_due
+           FROM students s
+           JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+           JOIN fee_vouchers v ON sch.id = v.student_class_history_id
+           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+           LEFT JOIN fee_payments p ON v.id = p.voucher_id
+           WHERE s.id = $1
+           GROUP BY v.id
+           HAVING SUM(vi.amount) > COALESCE(SUM(p.amount), 0)
+         )
+         SELECT 
+           s.id as student_id,
+           s.name as student_name,
+           s.roll_no,
+           COUNT(vd.voucher_id) as unpaid_vouchers,
+           COALESCE(SUM(vd.voucher_due), 0) as total_due
          FROM students s
-         JOIN student_class_history sch ON s.id = sch.student_id
-         JOIN fee_vouchers v ON sch.id = v.student_class_history_id
-         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-         LEFT JOIN fee_payments p ON v.id = p.voucher_id
+         LEFT JOIN VouchersDue vd ON true
          WHERE s.id = $1
-         GROUP BY s.id, s.name, s.roll_no
-         HAVING SUM(vi.amount) > COALESCE(SUM(p.amount), 0)`,
+         GROUP BY s.id, s.name, s.roll_no`,
         [id]
       );
 
-      if (result.rows.length === 0) {
+      if (result.rows.length === 0 || result.rows[0].total_due == 0) {
         return ApiResponse.success(res, {
           student_id: parseInt(id),
           total_due: 0,
