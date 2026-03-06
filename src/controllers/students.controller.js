@@ -685,11 +685,6 @@ class StudentsController {
 
       const enrollment = enrollmentResult.rows[0];
 
-      if (enrollment.class_type !== 'COLLEGE') {
-        await client.query('ROLLBACK');
-        return ApiResponse.error(res, 'Yearly package is only for college students', 400);
-      }
-
       if (!enrollment.is_active) {
         await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Student is not active', 400);

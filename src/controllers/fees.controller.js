@@ -482,7 +482,7 @@ class FeesController {
              COALESCE(SUM(p.amount), 0) as voucher_paid,
              SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as voucher_due
            FROM students s
-           JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
+           JOIN student_class_history sch ON s.id = sch.student_id
            JOIN fee_vouchers v ON sch.id = v.student_class_history_id
            JOIN fee_voucher_items vi ON v.id = vi.voucher_id
            LEFT JOIN fee_payments p ON v.id = p.voucher_id
