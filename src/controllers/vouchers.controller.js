@@ -31,13 +31,14 @@ class VouchersController {
     try {
       await client.query('BEGIN');
 
-      const { student_id, month, fee_types, custom_items = [], due_date } = req.body;
+      const { student_id, month, fee_types, custom_items = [], due_date, yearly_package_amount } = req.body;
 
       // Validate input
       const schema = Joi.object({
         student_id: Joi.number().integer().required(),
         month: Joi.date().required(),
         due_date: Joi.date().optional(),
+        yearly_package_amount: Joi.number().positive().optional(),
         fee_types: Joi.array().items(
           Joi.string().valid('ADMISSION', 'MONTHLY', 'PAPER_FUND', 'EXAM', 'TRANSPORT', 'OTHER')
         ).optional(),
@@ -74,6 +75,60 @@ class VouchersController {
 
       const enrollment = enrollmentCheck.rows[0];
       const isBulkImported = enrollment.is_bulk_imported || false;
+
+      // ── College class: single YEARLY_COLLEGE voucher path ──────────────────
+      const classTypeResult = await client.query(
+        `SELECT class_type FROM classes WHERE id = $1`,
+        [enrollment.class_id]
+      );
+      const isCollegeClass = classTypeResult.rows[0]?.class_type === 'COLLEGE';
+
+      if (isCollegeClass) {
+        if (!yearly_package_amount || parseFloat(yearly_package_amount) <= 0) {
+          await client.query('ROLLBACK');
+          return ApiResponse.error(
+            res,
+            'yearly_package_amount is required for College class students',
+            400
+          );
+        }
+
+        // Block duplicate yearly voucher for this enrollment
+        const existingYearly = await client.query(
+          `SELECT id FROM fee_vouchers
+           WHERE student_class_history_id = $1 AND voucher_type = 'YEARLY_COLLEGE'`,
+          [enrollment.id]
+        );
+        if (existingYearly.rows.length > 0) {
+          await client.query('ROLLBACK');
+          return ApiResponse.error(
+            res,
+            'Annual fee voucher already exists for this student. Use the Edit Voucher Items feature to revise the package amount.',
+            400
+          );
+        }
+
+        // Create the single yearly voucher (no due_date concept for yearly)
+        const voucherResult = await client.query(
+          `INSERT INTO fee_vouchers (student_class_history_id, month, voucher_type)
+           VALUES ($1, $2, 'YEARLY_COLLEGE')
+           RETURNING *`,
+          [enrollment.id, month]
+        );
+        const voucher = voucherResult.rows[0];
+
+        // Single fee item representing the entire yearly package
+        await client.query(
+          `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+           VALUES ($1, 'YEARLY_PACKAGE', $2, 'Annual Fee Package')`,
+          [voucher.id, parseFloat(yearly_package_amount)]
+        );
+
+        await client.query('COMMIT');
+        const complete = await this.getVoucherById(client, voucher.id);
+        return ApiResponse.created(res, complete, 'Annual fee voucher generated successfully');
+      }
+      // ── End college path ────────────────────────────────────────────────────
 
       // Check if student is fee-free
       if (enrollment.is_fee_free) {
@@ -177,10 +232,10 @@ class VouchersController {
         return new Date(voucherMonth.getFullYear(), voucherMonth.getMonth(), 10);
       })();
 
-      // Create voucher with due date and discount description
+      // Create voucher with due date and discount description (MONTHLY type)
       const voucherResult = await client.query(
-        `INSERT INTO fee_vouchers (student_class_history_id, month, due_date, discount_description)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO fee_vouchers (student_class_history_id, month, due_date, discount_description, voucher_type)
+         VALUES ($1, $2, $3, $4, 'MONTHLY')
          RETURNING *`,
         [enrollment.id, month, calculatedDueDate, discountDescription]
       );
@@ -377,6 +432,20 @@ class VouchersController {
         return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
       }
 
+      // Block bulk generation for college classes (they get yearly vouchers at admission)
+      const bulkClassTypeResult = await client.query(
+        `SELECT class_type FROM classes WHERE id = $1`,
+        [class_id]
+      );
+      if (bulkClassTypeResult.rows[0]?.class_type === 'COLLEGE') {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          'Bulk voucher generation is not applicable for College classes. College students receive a single annual fee voucher at the time of admission.',
+          400
+        );
+      }
+
       const fees = feeStructure.rows[0];
 
       // Get all enrolled students in class/section (exclude fee-free students)
@@ -569,10 +638,10 @@ class VouchersController {
             }
           }
 
-          // Create voucher with due date
+          // Create monthly voucher
           const voucherResult = await client.query(
-            `INSERT INTO fee_vouchers (student_class_history_id, month, due_date)
-             VALUES ($1, $2, $3)
+            `INSERT INTO fee_vouchers (student_class_history_id, month, due_date, voucher_type)
+             VALUES ($1, $2, $3, 'MONTHLY')
              RETURNING *`,
             [student.enrollment_id, month, calculatedDueDate]
           );
@@ -697,6 +766,7 @@ class VouchersController {
         SELECT v.id as voucher_id,
                v.month,
                v.created_at,
+               v.voucher_type,
                s.id as student_id,
                s.name as student_name,
                s.father_name,
@@ -767,7 +837,7 @@ class VouchersController {
         paramCount++;
       }
 
-      query += ` GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, s.phone, s.roll_no, c.id, c.name, sec.id, sec.name`;
+      query += ` GROUP BY v.id, v.month, v.created_at, v.voucher_type, s.id, s.name, s.father_name, s.phone, s.roll_no, c.id, c.name, sec.id, sec.name`;
 
       // Apply status filter after grouping
       if (status) {
@@ -861,6 +931,7 @@ class VouchersController {
               v.month,
               v.due_date,
               v.created_at,
+              v.voucher_type,
               s.id as student_id,
               s.name as student_name,
               s.father_name,
@@ -899,7 +970,7 @@ class VouchersController {
        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
        LEFT JOIN PaymentTotal pt ON v.id = pt.voucher_id
        WHERE v.id = $1
-       GROUP BY v.id, v.month, v.due_date, v.created_at, s.id, s.name, s.father_name, s.roll_no, s.phone, 
+       GROUP BY v.id, v.month, v.due_date, v.created_at, v.voucher_type, s.id, s.name, s.father_name, s.roll_no, s.phone, 
                 c.id, c.name, sec.id, sec.name, pt.paid_amount`,
       [voucherId]
     );
@@ -923,7 +994,7 @@ class VouchersController {
       const schema = Joi.object({
         items: Joi.array().items(
           Joi.object({
-            item_type: Joi.string().valid('MONTHLY','ADMISSION','PAPER_FUND','TRANSPORT','DISCOUNT','ARREARS','CUSTOM').required(),
+            item_type: Joi.string().valid('MONTHLY','ADMISSION','PAPER_FUND','TRANSPORT','DISCOUNT','ARREARS','CUSTOM','YEARLY_PACKAGE').required(),
             amount: Joi.number().min(0).required(),
             description: Joi.string().optional().allow('', null)
           })
@@ -935,14 +1006,15 @@ class VouchersController {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
-      // Check if voucher exists and is unpaid
+      // Check if voucher exists and get its type and payment status
       const voucherCheck = await client.query(
         `SELECT v.id,
+                v.voucher_type,
                 COALESCE(SUM(p.amount), 0) as paid_amount
          FROM fee_vouchers v
          LEFT JOIN fee_payments p ON v.id = p.voucher_id
          WHERE v.id = $1
-         GROUP BY v.id`,
+         GROUP BY v.id, v.voucher_type`,
         [id]
       );
 
@@ -950,7 +1022,12 @@ class VouchersController {
         return ApiResponse.error(res, 'Voucher not found', 404);
       }
 
-      if (parseFloat(voucherCheck.rows[0].paid_amount) > 0) {
+      // Allow editing yearly college vouchers even with payments (package amount revision)
+      // Block editing only for MONTHLY vouchers that already have payments
+      if (
+        parseFloat(voucherCheck.rows[0].paid_amount) > 0 &&
+        voucherCheck.rows[0].voucher_type !== 'YEARLY_COLLEGE'
+      ) {
         return ApiResponse.error(
           res,
           'Cannot modify items for a voucher that has payments',
@@ -1154,6 +1231,19 @@ class VouchersController {
 
       if (feeStructure.rows.length === 0) {
         return ApiResponse.error(res, 'Fee structure not defined for this class', 400);
+      }
+
+      // Block preview for college classes
+      const previewClassTypeResult = await client.query(
+        `SELECT class_type FROM classes WHERE id = $1`,
+        [class_id]
+      );
+      if (previewClassTypeResult.rows[0]?.class_type === 'COLLEGE') {
+        return ApiResponse.error(
+          res,
+          'Bulk voucher preview is not applicable for College classes. College students receive a single annual fee voucher at the time of admission.',
+          400
+        );
       }
 
       const fees = feeStructure.rows[0];
