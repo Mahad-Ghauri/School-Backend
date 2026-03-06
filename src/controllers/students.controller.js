@@ -393,22 +393,20 @@ class StudentsController {
         ) cfs ON true
         LEFT JOIN student_guardians sg ON s.id = sg.student_id AND sg.relation = 'Father'
         LEFT JOIN guardians g ON sg.guardian_id = g.id
-        -- College fee calculation joins
+        -- College fee calculation joins (across ALL enrollments, not just current)
         LEFT JOIN LATERAL (
-          SELECT fvi.amount
-          FROM fee_vouchers fv 
+          SELECT COALESCE(SUM(fvi.amount), 0) as amount
+          FROM student_class_history sch_all
+          JOIN fee_vouchers fv ON fv.student_class_history_id = sch_all.id
           JOIN fee_voucher_items fvi ON fv.id = fvi.voucher_id
-          WHERE fv.student_class_history_id = sch.id 
-            AND fv.voucher_type = 'YEARLY_COLLEGE'
-            AND fvi.item_type = 'YEARLY_PACKAGE'
-          LIMIT 1
+          WHERE sch_all.student_id = s.id
         ) yearly_package ON c.class_type = 'COLLEGE'
         LEFT JOIN LATERAL (
           SELECT COALESCE(SUM(fp.amount), 0) as amount
-          FROM fee_vouchers fv 
+          FROM student_class_history sch_all
+          JOIN fee_vouchers fv ON fv.student_class_history_id = sch_all.id
           JOIN fee_payments fp ON fv.id = fp.voucher_id
-          WHERE fv.student_class_history_id = sch.id 
-            AND fv.voucher_type = 'YEARLY_COLLEGE'
+          WHERE sch_all.student_id = s.id
         ) total_payments ON c.class_type = 'COLLEGE'
         WHERE 1=1
       `;
