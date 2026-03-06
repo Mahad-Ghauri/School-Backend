@@ -268,6 +268,75 @@ class AuthController {
   }
 
   /**
+   * Admin reset any user's password (Admin only)
+   * PUT /api/auth/users/:id/reset-password
+   * Admin must supply their own current password as verification, then provide a new password for the target user.
+   */
+  async adminResetPassword(req, res, next) {
+    const client = await pool.connect();
+    try {
+      const { id } = req.params;
+      const { adminCurrentPassword, newPassword } = req.body;
+
+      const schema = Joi.object({
+        adminCurrentPassword: Joi.string().required(),
+        newPassword: Joi.string().min(6).required()
+      });
+
+      const { error } = schema.validate(req.body);
+      if (error) {
+        return ApiResponse.error(res, error.details[0].message, 400);
+      }
+
+      // Verify the admin's own current password
+      const adminResult = await client.query(
+        'SELECT password_hash FROM users WHERE id = $1',
+        [req.user.id]
+      );
+
+      if (adminResult.rows.length === 0) {
+        return ApiResponse.error(res, 'Admin user not found', 404);
+      }
+
+      const isAdminPasswordValid = await CryptoUtil.comparePassword(
+        adminCurrentPassword,
+        adminResult.rows[0].password_hash
+      );
+
+      if (!isAdminPasswordValid) {
+        return ApiResponse.error(res, 'Your current password is incorrect', 401);
+      }
+
+      // Check target user exists
+      const targetResult = await client.query(
+        'SELECT id, email FROM users WHERE id = $1',
+        [id]
+      );
+
+      if (targetResult.rows.length === 0) {
+        return ApiResponse.error(res, 'Target user not found', 404);
+      }
+
+      // Hash and update the target user's password
+      const newPasswordHash = await CryptoUtil.hashPassword(newPassword);
+      await client.query(
+        'UPDATE users SET password_hash = $1 WHERE id = $2',
+        [newPasswordHash, id]
+      );
+
+      return ApiResponse.success(
+        res,
+        { id: targetResult.rows[0].id, email: targetResult.rows[0].email },
+        'Password reset successfully'
+      );
+    } catch (error) {
+      next(error);
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Delete user (Admin only)
    * DELETE /api/auth/users/:id
    */
