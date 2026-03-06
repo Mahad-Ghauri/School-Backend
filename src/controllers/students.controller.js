@@ -1527,15 +1527,6 @@ class StudentsController {
       // Delete the student record (cascades to student_guardians, student_documents)
       await client.query('DELETE FROM students WHERE id = $1', [id]);
 
-      // Update section strength if student was actively enrolled
-      if (enrollmentInfo.rows.length > 0) {
-        const { section_id } = enrollmentInfo.rows[0];
-        await client.query(
-          'UPDATE sections SET current_strength = GREATEST(0, current_strength - 1) WHERE id = $1',
-          [section_id]
-        );
-      }
-
       await client.query('COMMIT');
 
       return ApiResponse.success(
