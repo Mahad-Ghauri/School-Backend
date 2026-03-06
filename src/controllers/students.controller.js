@@ -309,12 +309,34 @@ class StudentsController {
       [studentId]
     );
 
+    // Get college yearly fee info (only relevant for COLLEGE students)
+    const collegeYearlyResult = await client.query(
+      `SELECT fv.id, fv.total_amount,
+              COALESCE(
+                (SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = fv.id), 0
+              ) as paid_amount
+       FROM fee_vouchers fv
+       JOIN student_class_history sch ON fv.student_class_history_id = sch.id
+       WHERE sch.student_id = $1 AND sch.end_date IS NULL
+         AND fv.voucher_type = 'YEARLY_COLLEGE'
+       LIMIT 1`,
+      [studentId]
+    );
+    const cfRow = collegeYearlyResult.rows[0] || null;
+    const college_yearly_fee = cfRow ? {
+      id: cfRow.id,
+      total_amount: parseFloat(cfRow.total_amount) || 0,
+      paid_amount: parseFloat(cfRow.paid_amount) || 0,
+      pending_amount: (parseFloat(cfRow.total_amount) || 0) - (parseFloat(cfRow.paid_amount) || 0)
+    } : null;
+
     return {
       ...student,
       guardians: guardiansResult.rows,
       current_enrollment: enrollmentResult.rows[0] || null,
       enrollment_history: historyResult.rows,
-      documents: documentsResult.rows
+      documents: documentsResult.rows,
+      college_yearly_fee
     };
   }
 
@@ -372,7 +394,9 @@ class StudentsController {
                cfs.admission_fee,
                cfs.paper_fund,
                g.name as father_guardian_name,
-               COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee
+               COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee,
+               yearly_v.yearly_total_amount,
+               yearly_v.yearly_paid_amount
         FROM students s
         LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
         LEFT JOIN classes c ON sch.class_id = c.id
@@ -385,6 +409,16 @@ class StudentsController {
         ) cfs ON true
         LEFT JOIN student_guardians sg ON s.id = sg.student_id AND sg.relation = 'Father'
         LEFT JOIN guardians g ON sg.guardian_id = g.id
+        LEFT JOIN LATERAL (
+          SELECT fv.total_amount as yearly_total_amount,
+                 COALESCE(
+                   (SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = fv.id), 0
+                 ) as yearly_paid_amount
+          FROM fee_vouchers fv
+          WHERE fv.student_class_history_id = sch.id
+            AND fv.voucher_type = 'YEARLY_COLLEGE'
+          LIMIT 1
+        ) yearly_v ON true
         WHERE 1=1
       `;
 
@@ -625,19 +659,22 @@ class StudentsController {
   async updateBasicInfo(req, res, next) {
     const client = await pool.connect();
     try {
+      await client.query('BEGIN');
       const { id } = req.params;
-      const { name, father_name, phone, individual_monthly_fee } = req.body;
+      const { name, father_name, phone, individual_monthly_fee, yearly_package_amount } = req.body;
 
       // Validate input
       const schema = Joi.object({
         name: Joi.string().optional(),
         father_name: Joi.string().optional().allow('', null),
         phone: Joi.string().optional().allow('', null),
-        individual_monthly_fee: Joi.number().optional().allow(null)
+        individual_monthly_fee: Joi.number().optional().allow(null),
+        yearly_package_amount: Joi.number().positive().optional().allow(null)
       });
 
       const { error } = schema.validate(req.body);
       if (error) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
@@ -669,7 +706,14 @@ class StudentsController {
         paramCount++;
       }
 
+      if (yearly_package_amount !== undefined && yearly_package_amount !== null) {
+        updates.push(`yearly_package_amount = $${paramCount}`);
+        values.push(parseFloat(yearly_package_amount));
+        paramCount++;
+      }
+
       if (updates.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'No fields to update', 400);
       }
 
@@ -680,11 +724,55 @@ class StudentsController {
       );
 
       if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Student not found', 404);
       }
 
-      return ApiResponse.success(res, result.rows[0], 'Student information updated successfully');
+      // If yearly_package_amount was updated, sync the YEARLY_COLLEGE voucher items and totals
+      if (yearly_package_amount !== undefined && yearly_package_amount !== null) {
+        const newAmt = parseFloat(yearly_package_amount);
+        // Update the YEARLY_PACKAGE fee item amount
+        await client.query(
+          `UPDATE fee_voucher_items fvi
+           SET amount = $1
+           FROM fee_vouchers fv
+           JOIN student_class_history sch ON fv.student_class_history_id = sch.id
+           WHERE fvi.voucher_id = fv.id
+             AND fvi.item_type = 'YEARLY_PACKAGE'
+             AND fv.voucher_type = 'YEARLY_COLLEGE'
+             AND sch.student_id = $2
+             AND sch.end_date IS NULL`,
+          [newAmt, id]
+        );
+        // Recalculate voucher totals
+        await client.query(
+          `UPDATE fee_vouchers fv
+           SET total_amount = (
+                 SELECT COALESCE(SUM(fvi2.amount), 0)
+                 FROM fee_voucher_items fvi2
+                 WHERE fvi2.voucher_id = fv.id
+               ),
+               due_amount = (
+                 SELECT COALESCE(SUM(fvi2.amount), 0)
+                 FROM fee_voucher_items fvi2
+                 WHERE fvi2.voucher_id = fv.id
+               ) - COALESCE(
+                 (SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = fv.id), 0
+               )
+           FROM student_class_history sch
+           WHERE fv.student_class_history_id = sch.id
+             AND fv.voucher_type = 'YEARLY_COLLEGE'
+             AND sch.student_id = $1
+             AND sch.end_date IS NULL`,
+          [id]
+        );
+      }
+
+      await client.query('COMMIT');
+      const updatedStudent = await this.getStudentById(client, id);
+      return ApiResponse.success(res, updatedStudent, 'Student information updated successfully');
     } catch (error) {
+      await client.query('ROLLBACK').catch(() => {});
       next(error);
     } finally {
       client.release();
