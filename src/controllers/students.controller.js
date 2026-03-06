@@ -1278,6 +1278,18 @@ class StudentsController {
         return ApiResponse.error(res, 'Student has no active enrollment to transfer from', 400);
       }
 
+      // Transfer is within the same class only (different section)
+      if (String(class_id) !== String(activeEnrollment.rows[0].class_id)) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Transfer is only allowed within the same class. Use Promote to move to a different class.', 400);
+      }
+
+      // Cannot transfer to the same section
+      if (String(section_id) === String(activeEnrollment.rows[0].section_id)) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'Student is already in this section.', 400);
+      }
+
       const transferDateValue = transfer_date ? new Date(transfer_date) : new Date();
 
       await client.query(
@@ -1434,6 +1446,12 @@ class StudentsController {
         [id, class_id, section_id, promotionDateValue, serialNumber]
       );
 
+      // Reset individual monthly fee so the new class fee structure is used
+      await client.query(
+        'UPDATE students SET individual_monthly_fee = NULL WHERE id = $1',
+        [id]
+      );
+
       // Handle discount reset if requested
       if (reset_discount) {
         await client.query(
@@ -1446,7 +1464,7 @@ class StudentsController {
 
       const updatedStudent = await this.getStudentById(client, id);
 
-      return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Note: Generate the first voucher for the new class to apply promotion/admission fees.');
+      return ApiResponse.success(res, updatedStudent, 'Student promoted successfully. Monthly fee updated to new class fee structure.');
     } catch (error) {
       await client.query('ROLLBACK');
       next(error);
