@@ -43,13 +43,14 @@ class VouchersController {
         ).optional(),
         custom_items: Joi.array().items(
           Joi.object({
-            item_type: Joi.string().required(),
-            amount: Joi.number().required()
+            item_type: Joi.string().optional().default('CUSTOM'),
+            amount: Joi.number().required(),
+            description: Joi.string().optional().allow('', null)
           })
         ).optional()
       });
 
-      const { error } = schema.validate(req.body);
+      const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
@@ -299,11 +300,20 @@ class VouchersController {
 
       // Insert custom items (arrears, transport, late fees, etc.)
       for (const item of custom_items) {
-        await client.query(
-          `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
-           VALUES ($1, $2, $3)`,
-          [voucher.id, item.item_type, item.amount]
-        );
+        const itemType = item.item_type || 'CUSTOM';
+        if (item.description && itemType === 'CUSTOM') {
+          await client.query(
+            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+             VALUES ($1, $2, $3, $4)`,
+            [voucher.id, itemType, item.amount, item.description]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+             VALUES ($1, $2, $3)`,
+            [voucher.id, itemType, item.amount]
+          );
+        }
       }
 
       await client.query('COMMIT');
@@ -348,7 +358,7 @@ class VouchersController {
         ).optional()
       });
 
-      const { error } = schema.validate(req.body);
+      const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
@@ -1127,7 +1137,7 @@ class VouchersController {
         ).optional()
       });
 
-      const { error } = schema.validate(req.body);
+      const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
