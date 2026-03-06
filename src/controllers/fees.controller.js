@@ -302,6 +302,15 @@ class FeesController {
       const { class_id, section_id, min_due_amount = 0, overdue_only = 'false' } = req.query;
 
       let query = `
+        WITH voucher_amounts AS (
+          SELECT 
+            v.id as voucher_id,
+            v.student_class_history_id,
+            v.due_date,
+            (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as voucher_total,
+            (SELECT COALESCE(SUM(p.amount), 0) FROM fee_payments p WHERE p.voucher_id = v.id) as voucher_paid
+          FROM fee_vouchers v
+        )
         SELECT 
           s.id as student_id,
           s.name as student_name,
@@ -312,18 +321,16 @@ class FeesController {
           c.name as class_name,
           sec.id as section_id,
           sec.name as section_name,
-          COUNT(v.id) as total_vouchers,
-          SUM(vi.amount) as total_fee,
-          COALESCE(SUM(p.amount), 0) as paid_amount,
-          SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount
+          COUNT(va.voucher_id) as total_vouchers,
+          COALESCE(SUM(va.voucher_total), 0) as total_fee,
+          COALESCE(SUM(va.voucher_paid), 0) as paid_amount,
+          COALESCE(SUM(va.voucher_total - va.voucher_paid), 0) as due_amount
         FROM students s
         JOIN student_class_history sch_curr ON s.id = sch_curr.student_id AND sch_curr.end_date IS NULL
         JOIN classes c ON sch_curr.class_id = c.id
         JOIN sections sec ON sch_curr.section_id = sec.id
         JOIN student_class_history sch_all ON s.id = sch_all.student_id
-        JOIN fee_vouchers v ON sch_all.id = v.student_class_history_id
-        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-        LEFT JOIN fee_payments p ON v.id = p.voucher_id
+        JOIN voucher_amounts va ON sch_all.id = va.student_class_history_id AND va.voucher_total > va.voucher_paid
         WHERE s.is_active = true
       `;
 
@@ -344,16 +351,15 @@ class FeesController {
 
       // Filter by overdue vouchers only
       if (overdue_only === 'true') {
-        query += ` AND v.due_date < CURRENT_DATE`;
+        query += ` AND va.due_date < CURRENT_DATE`;
       }
 
       query += ` 
         GROUP BY s.id, s.name, s.roll_no, s.phone, s.father_name, c.id, c.name, sec.id, sec.name
-        HAVING SUM(vi.amount) > COALESCE(SUM(p.amount), 0)
       `;
 
       if (min_due_amount > 0) {
-        query += ` AND SUM(vi.amount) - COALESCE(SUM(p.amount), 0) >= $${paramCount}`;
+        query += ` HAVING SUM(va.voucher_total - va.voucher_paid) >= $${paramCount}`;
         params.push(min_due_amount);
         paramCount++;
       }
@@ -412,18 +418,22 @@ class FeesController {
                 v.created_at,
                 c.name as class_name,
                 sec.name as section_name,
-                SUM(vi.amount) as total_fee,
-                COALESCE(SUM(p.amount), 0) as paid_amount,
-                SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as due_amount,
+                (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as total_fee,
+                (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) as paid_amount,
+                (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) -
+                (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) as due_amount,
                 CASE 
-                  WHEN SUM(vi.amount) <= COALESCE(SUM(p.amount), 0) THEN 'PAID'
-                  WHEN COALESCE(SUM(p.amount), 0) > 0 THEN 'PARTIAL'
+                  WHEN (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) <= 
+                       (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) THEN 'PAID'
+                  WHEN (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) > 0 THEN 'PARTIAL'
                   ELSE 'UNPAID'
                 END as status,
-                json_agg(json_build_object(
+                (SELECT json_agg(json_build_object(
                   'item_type', vi.item_type,
                   'amount', vi.amount
-                )) as items,
+                ))
+                FROM fee_voucher_items vi
+                WHERE vi.voucher_id = v.id) as items,
                 (SELECT json_agg(json_build_object(
                   'amount', fp.amount,
                   'payment_date', fp.payment_date,
@@ -435,10 +445,7 @@ class FeesController {
          JOIN student_class_history sch ON v.student_class_history_id = sch.id
          JOIN classes c ON sch.class_id = c.id
          JOIN sections sec ON sch.section_id = sec.id
-         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-         LEFT JOIN fee_payments p ON v.id = p.voucher_id
          WHERE sch.student_id = $1
-         GROUP BY v.id, v.month, v.created_at, c.name, sec.name
          ORDER BY v.month DESC`,
         [id]
       );
@@ -478,24 +485,19 @@ class FeesController {
         `WITH VouchersDue AS (
            SELECT 
              v.id as voucher_id,
-             SUM(vi.amount) as voucher_total,
-             COALESCE(SUM(p.amount), 0) as voucher_paid,
-             SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as voucher_due
+             (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as voucher_total,
+             (SELECT COALESCE(SUM(p.amount), 0) FROM fee_payments p WHERE p.voucher_id = v.id) as voucher_paid
            FROM students s
            JOIN student_class_history sch ON s.id = sch.student_id
            JOIN fee_vouchers v ON sch.id = v.student_class_history_id
-           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-           LEFT JOIN fee_payments p ON v.id = p.voucher_id
            WHERE s.id = $1
-           GROUP BY v.id
-           HAVING SUM(vi.amount) > COALESCE(SUM(p.amount), 0)
          )
          SELECT 
            s.id as student_id,
            s.name as student_name,
            s.roll_no,
-           COUNT(vd.voucher_id) as unpaid_vouchers,
-           COALESCE(SUM(vd.voucher_due), 0) as total_due
+           COUNT(CASE WHEN vd.voucher_total > vd.voucher_paid THEN 1 END) as unpaid_vouchers,
+           COALESCE(SUM(CASE WHEN vd.voucher_total > vd.voucher_paid THEN vd.voucher_total - vd.voucher_paid ELSE 0 END), 0) as total_due
          FROM students s
          LEFT JOIN VouchersDue vd ON true
          WHERE s.id = $1
