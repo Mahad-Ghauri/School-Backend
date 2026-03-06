@@ -369,9 +369,9 @@ class PDFService {
         [voucherId]
       );
 
-      // Fetch payments
+      // Fetch payments with more details
       const paymentsResult = await client.query(
-        'SELECT amount, payment_date FROM fee_payments WHERE voucher_id = $1 ORDER BY payment_date',
+        'SELECT amount, payment_date, created_at FROM fee_payments WHERE voucher_id = $1 ORDER BY payment_date, created_at',
         [voucherId]
       );
 
@@ -501,6 +501,64 @@ class PDFService {
         doc.text(`Rs. ${pendingAmount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
         y += 20;
         doc.fillColor('#000000');
+      }
+
+      // For college vouchers, show individual payment history
+      if (voucher.class_type === 'COLLEGE' && paymentsResult.rows.length > 0) {
+        y += 10;
+        doc.moveTo(50, y).lineTo(550, y).stroke();
+        y += 15;
+        
+        doc.fontSize(12).font('Helvetica-Bold');
+        doc.text('Payment History:', 50, y);
+        y += 20;
+        
+        // Payment table headers
+        doc.fontSize(10).font('Helvetica-Bold');
+        doc.text('Date', 60, y);
+        doc.text('Amount', 200, y);
+        doc.text('Balance After Payment', 350, y);
+        y += 18;
+        
+        doc.moveTo(50, y).lineTo(550, y).stroke();
+        y += 8;
+        
+        // Individual payment records
+        doc.fontSize(9).font('Helvetica');
+        let runningBalance = voucherData.total_amount;
+        
+        paymentsResult.rows.forEach((payment, index) => {
+          const paymentAmount = parseFloat(payment.amount);
+          runningBalance -= paymentAmount;
+          const paymentDate = new Date(payment.payment_date);
+          const timeStr = payment.created_at ? new Date(payment.created_at).toLocaleTimeString('en-PK', { 
+            hour: '2-digit', 
+            minute: '2-digit',
+            hour12: true 
+          }) : '';
+          
+          // Payment row
+          doc.text(`${paymentDate.toLocaleDateString('en-PK')}${timeStr ? ` ${timeStr}` : ''}`, 60, y);
+          doc.fillColor('#059669').text(`Rs. ${paymentAmount.toFixed(0)}`, 200, y);
+          doc.fillColor(runningBalance > 0 ? '#dc2626' : '#059669')
+             .text(`Rs. ${runningBalance.toFixed(0)}`, 350, y);
+          doc.fillColor('#000000');
+          y += 15;
+          
+          // Add a subtle line between payments
+          if (index < paymentsResult.rows.length - 1) {
+            doc.strokeColor('#e5e5e5')
+               .moveTo(60, y - 2)
+               .lineTo(520, y - 2)
+               .stroke();
+            doc.strokeColor('#000000');
+            y += 3;
+          }
+        });
+        
+        y += 5;
+        doc.moveTo(50, y).lineTo(550, y).stroke();
+        y += 10;
       }
       y += 5;
 
