@@ -372,7 +372,14 @@ class StudentsController {
                cfs.admission_fee,
                cfs.paper_fund,
                g.name as father_guardian_name,
-               COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee
+               COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee,
+               CASE 
+                 WHEN c.class_type = 'COLLEGE' THEN 
+                   COALESCE(yearly_package.amount, 0) - COALESCE(total_payments.amount, 0)
+                 ELSE 0 
+               END as pending_amount,
+               COALESCE(yearly_package.amount, 0) as yearly_package_amount,
+               COALESCE(total_payments.amount, 0) as total_paid_amount
         FROM students s
         LEFT JOIN student_class_history sch ON s.id = sch.student_id AND sch.end_date IS NULL
         LEFT JOIN classes c ON sch.class_id = c.id
@@ -385,6 +392,23 @@ class StudentsController {
         ) cfs ON true
         LEFT JOIN student_guardians sg ON s.id = sg.student_id AND sg.relation = 'Father'
         LEFT JOIN guardians g ON sg.guardian_id = g.id
+        -- College fee calculation joins
+        LEFT JOIN LATERAL (
+          SELECT fvi.amount
+          FROM fee_vouchers fv 
+          JOIN fee_voucher_items fvi ON fv.id = fvi.voucher_id
+          WHERE fv.student_class_history_id = sch.id 
+            AND fv.voucher_type = 'YEARLY_COLLEGE'
+            AND fvi.item_type = 'YEARLY_PACKAGE'
+          LIMIT 1
+        ) yearly_package ON c.class_type = 'COLLEGE'
+        LEFT JOIN LATERAL (
+          SELECT COALESCE(SUM(fp.amount), 0) as amount
+          FROM fee_vouchers fv 
+          JOIN fee_payments fp ON fv.id = fp.voucher_id
+          WHERE fv.student_class_history_id = sch.id 
+            AND fv.voucher_type = 'YEARLY_COLLEGE'
+        ) total_payments ON c.class_type = 'COLLEGE'
         WHERE 1=1
       `;
 
@@ -479,12 +503,16 @@ class StudentsController {
           name: result.rows[0].name,
           class_id: result.rows[0].class_id,
           class_name: result.rows[0].class_name,
+          class_type: result.rows[0].class_type,
           section_id: result.rows[0].section_id,
           section_name: result.rows[0].section_name,
           father_name: result.rows[0].father_name,
           phone: result.rows[0].phone,
           individual_monthly_fee: result.rows[0].individual_monthly_fee,
-          effective_monthly_fee: result.rows[0].effective_monthly_fee
+          effective_monthly_fee: result.rows[0].effective_monthly_fee,
+          pending_amount: result.rows[0].pending_amount,
+          yearly_package_amount: result.rows[0].yearly_package_amount,
+          total_paid_amount: result.rows[0].total_paid_amount
         });
       }
 
