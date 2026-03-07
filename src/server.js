@@ -4,8 +4,24 @@ const pool = require('./config/db');
 
 const PORT = config.port;
 
-// Start server
-const server = app.listen(PORT, () => {
+// Start server - bind to all interfaces for hotspot compatibility
+const server = app.listen(PORT, '0.0.0.0', () => {
+  const os = require('os');
+  const networkInterfaces = os.networkInterfaces();
+  let localIP = 'localhost';
+  
+  // Find the first non-internal IPv4 address
+  for (const interfaceName in networkInterfaces) {
+    const networkInterface = networkInterfaces[interfaceName];
+    for (const connection of networkInterface) {
+      if (connection.family === 'IPv4' && !connection.internal) {
+        localIP = connection.address;
+        break;
+      }
+    }
+    if (localIP !== 'localhost') break;
+  }
+  
   console.log(`
   ╔════════════════════════════════════════════════════╗
   ║                                                    ║
@@ -15,8 +31,11 @@ const server = app.listen(PORT, () => {
   ║   Port: ${PORT.toString().padEnd(42)}║
   ║   Database: Connected ✅                           ║
   ║                                                    ║
-  ║   API: http://localhost:${PORT}/api                ║
+  ║   Local: http://localhost:${PORT}/api              ║
+  ║   Network: http://${localIP}:${PORT}/api           ║
   ║   Health: http://localhost:${PORT}/health          ║
+  ║                                                    ║
+  ║   📱 Hotspot Ready - Use Network URL above         ║
   ║                                                    ║
   ╚════════════════════════════════════════════════════╝
   `);
