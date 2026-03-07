@@ -56,7 +56,16 @@ class PDFService {
     doc.fontSize(8)
        .font('Helvetica')
        .text(
-         `Generated on: ${new Date().toLocaleDateString()} | Page ${pageNumber}`,
+         `Generated on: ${new Date().toLocaleDateString('en-PK', {
+           weekday: 'long',
+           year: 'numeric',
+           month: 'long', 
+           day: 'numeric'
+         })} at ${new Date().toLocaleTimeString('en-PK', {
+           hour: '2-digit',
+           minute: '2-digit',
+           hour12: true
+         })} | Page ${pageNumber}`,
          50,
          bottomY,
          { align: 'center', width: 500 }
@@ -145,9 +154,12 @@ class PDFService {
     doc.font('Helvetica').text(voucherData.class_name, valueX, currentY);
     currentY += lineHeight;
     
-    // Month
-    const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
-    doc.font('Helvetica-Bold').text('Month:', contentX, currentY);
+    // Month with enhanced formatting
+    const monthStr = new Date(voucherData.month).toLocaleDateString('en-PK', { 
+      month: 'long', 
+      year: 'numeric' 
+    });
+    doc.font('Helvetica-Bold').text('Month/Year:', contentX, currentY);
     doc.font('Helvetica').text(monthStr, valueX, currentY);
     currentY += lineHeight + 2;
     
@@ -189,24 +201,65 @@ class PDFService {
     doc.text(`Rs. ${totalAmount.toFixed(0)}`, contentX + contentWidth - 45, currentY);
     currentY += 10;
 
-    // Show paid/pending for partial payments
+    // Show paid/pending totals
     const paidAmt = parseFloat(voucherData.paid_amount) || 0;
-    if (paidAmt > 0 && paidAmt < totalAmount) {
-      const pendingAmt = totalAmount - paidAmt;
-      doc.fontSize(6.5).font('Helvetica-Bold');
-      doc.fillColor('#059669').text('Paid:', contentX, currentY);
-      doc.text(`Rs. ${paidAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
-      currentY += 9;
-      doc.fillColor('#dc2626').text('Pending:', contentX, currentY);
-      doc.text(`Rs. ${pendingAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
-      currentY += 9;
-      doc.fillColor('#000000');
+    if (paidAmt > 0) {
+      doc.moveTo(contentX, currentY).lineTo(contentX + contentWidth, currentY).stroke();
+      currentY += 4;
+
+      if (paidAmt < totalAmount) {
+        const pendingAmt = totalAmount - paidAmt;
+        doc.fontSize(6.5).font('Helvetica-Bold');
+        doc.fillColor('#059669').text('Paid:', contentX, currentY);
+        doc.text(`Rs. ${paidAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+        currentY += 9;
+        doc.fillColor('#dc2626').text('Pending:', contentX, currentY);
+        doc.text(`Rs. ${pendingAmt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+        currentY += 9;
+        doc.fillColor('#000000');
+      }
+
+      // Payment History with dates — one row per payment
+      const payments = voucherData.payments || [];
+      if (payments.length > 0) {
+        currentY += 3;
+        doc.fontSize(6.5).font('Helvetica-Bold').fillColor('#000000');
+        doc.text('Payment History:', contentX, currentY);
+        currentY += 9;
+
+        // Header row
+        doc.fontSize(6).font('Helvetica-Bold').fillColor('#555555');
+        doc.text('#', contentX, currentY);
+        doc.text('Date', contentX + 12, currentY);
+        doc.text('Amount', contentX + contentWidth - 45, currentY);
+        currentY += 8;
+        doc.moveTo(contentX, currentY).lineTo(contentX + contentWidth, currentY).stroke();
+        currentY += 3;
+
+        // One row per payment
+        doc.fontSize(6.5).font('Helvetica');
+        payments.forEach((payment, idx) => {
+          const amt = parseFloat(payment.amount);
+          const dateStr = payment.payment_date
+            ? new Date(payment.payment_date).toLocaleDateString('en-PK', {
+                day: '2-digit', month: 'short', year: 'numeric'
+              })
+            : 'N/A';
+          doc.fillColor('#333333').text(`${idx + 1}.`, contentX, currentY);
+          doc.fillColor('#1e293b').text(dateStr, contentX + 12, currentY);
+          doc.fillColor('#059669').font('Helvetica-Bold').text(`Rs. ${amt.toFixed(0)}`, contentX + contentWidth - 45, currentY);
+          doc.font('Helvetica');
+          currentY += 9;
+        });
+        doc.fillColor('#000000');
+        currentY += 2;
+      }
     } else {
       currentY += 1;
     }
     
     // Payment instructions
-    doc.fontSize(5.5).font('Helvetica');
+    doc.fontSize(5.5).font('Helvetica').fillColor('#000000');
     doc.text('Pay at school office during working hours.', contentX, currentY, { 
       width: contentWidth, 
       align: 'center' 
@@ -423,10 +476,10 @@ class PDFService {
          .text('FEE VOUCHER', { align: 'center' });
       doc.moveDown(1);
       
-      // Voucher details
-      const monthStr = new Date(voucherData.month).toLocaleDateString('en-US', { 
+      // Voucher details with enhanced date formatting
+      const monthStr = new Date(voucherData.month).toLocaleDateString('en-PK', { 
         month: 'long', 
-        year: 'numeric' 
+        year: 'numeric'
       });
       
       doc.fontSize(11).font('Helvetica');
@@ -503,64 +556,64 @@ class PDFService {
         doc.fillColor('#000000');
       }
 
-      // For college vouchers, show individual payment history
-      if (voucher.class_type === 'COLLEGE' && paymentsResult.rows.length > 0) {
+      // Show payment history with dates for ALL vouchers that have any payments
+      if (paymentsResult.rows.length > 0) {
         y += 10;
         doc.moveTo(50, y).lineTo(550, y).stroke();
-        y += 15;
-        
-        doc.fontSize(12).font('Helvetica-Bold');
+        y += 12;
+
+        doc.fontSize(12).font('Helvetica-Bold').fillColor('#000000');
         doc.text('Payment History:', 50, y);
-        y += 20;
-        
-        // Payment table headers
-        doc.fontSize(10).font('Helvetica-Bold');
-        doc.text('Date', 60, y);
-        doc.text('Amount', 200, y);
-        doc.text('Balance After Payment', 350, y);
         y += 18;
-        
-        doc.moveTo(50, y).lineTo(550, y).stroke();
-        y += 8;
-        
-        // Individual payment records
-        doc.fontSize(9).font('Helvetica');
+
+        // Header row background
+        doc.rect(50, y, 500, 18).fill('#e8f4fd');
+        doc.fillColor('#000000');
+
+        doc.fontSize(10).font('Helvetica-Bold').fillColor('#1e293b');
+        doc.text('#', 58, y + 4);
+        doc.text('Date of Payment', 78, y + 4);
+        doc.text('Amount Paid', 300, y + 4);
+        doc.text('Balance Remaining', 400, y + 4, { width: 148, align: 'right' });
+        y += 18;
+
+        doc.moveTo(50, y).lineTo(550, y).lineWidth(1).stroke();
+        y += 5;
+
+        // Individual payment rows
+        doc.fontSize(10).font('Helvetica');
         let runningBalance = voucherData.total_amount;
-        
+
         paymentsResult.rows.forEach((payment, index) => {
           const paymentAmount = parseFloat(payment.amount);
           runningBalance -= paymentAmount;
-          const paymentDate = new Date(payment.payment_date);
-          const timeStr = payment.created_at ? new Date(payment.created_at).toLocaleTimeString('en-PK', { 
-            hour: '2-digit', 
-            minute: '2-digit',
-            hour12: true 
-          }) : '';
-          
-          // Payment row
-          doc.text(`${paymentDate.toLocaleDateString('en-PK')}${timeStr ? ` ${timeStr}` : ''}`, 60, y);
-          doc.fillColor('#059669').text(`Rs. ${paymentAmount.toFixed(0)}`, 200, y);
-          doc.fillColor(runningBalance > 0 ? '#dc2626' : '#059669')
-             .text(`Rs. ${runningBalance.toFixed(0)}`, 350, y);
-          doc.fillColor('#000000');
-          y += 15;
-          
-          // Add a subtle line between payments
-          if (index < paymentsResult.rows.length - 1) {
-            doc.strokeColor('#e5e5e5')
-               .moveTo(60, y - 2)
-               .lineTo(520, y - 2)
-               .stroke();
-            doc.strokeColor('#000000');
-            y += 3;
+
+          const dateStr = new Date(payment.payment_date).toLocaleDateString('en-PK', {
+            weekday: 'short',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric'
+          });
+
+          // Alternating row shade
+          if (index % 2 === 1) {
+            doc.rect(50, y - 2, 500, 18).fill('#f9fafb');
           }
+
+          doc.fillColor('#64748b').font('Helvetica').text(`${index + 1}`, 58, y + 2);
+          doc.fillColor('#1e293b').text(dateStr, 78, y + 2);
+          doc.fillColor('#059669').font('Helvetica-Bold').text(`Rs. ${paymentAmount.toFixed(0)}`, 300, y + 2);
+          doc.fillColor(runningBalance > 0 ? '#dc2626' : '#059669')
+             .text(`Rs. ${runningBalance.toFixed(0)}`, 400, y + 2, { width: 148, align: 'right' });
+
+          doc.fillColor('#000000').font('Helvetica');
+          y += 18;
         });
-        
-        y += 5;
-        doc.moveTo(50, y).lineTo(550, y).stroke();
-        y += 10;
+
+        y += 4;
+        doc.moveTo(50, y).lineTo(550, y).lineWidth(0.5).stroke();
+        y += 12;
       }
-      y += 5;
 
       // Payment instructions
       doc.fontSize(10).font('Helvetica');
@@ -575,7 +628,16 @@ class PDFService {
       
       // Footer
       doc.fontSize(8).font('Helvetica')
-         .text(`Generated on: ${new Date().toLocaleDateString()}`, 50, 750, { align: 'center' })
+         .text(`Generated on: ${new Date().toLocaleDateString('en-PK', {
+           weekday: 'short',
+           year: 'numeric',
+           month: 'short',
+           day: '2-digit'
+         })} at ${new Date().toLocaleTimeString('en-PK', {
+           hour: '2-digit',
+           minute: '2-digit',
+           hour12: true
+         })}`, 50, 750, { align: 'center' })
          .text('This is a computer-generated document.', 50, 765, { align: 'center', italic: true });
 
       // Add "PAID" watermark if voucher is fully paid

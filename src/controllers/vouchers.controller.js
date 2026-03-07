@@ -783,7 +783,8 @@ class VouchersController {
                  WHEN SUM(vi.amount) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
                  WHEN COALESCE(MAX(p.paid_total), 0) > 0 THEN 'PARTIAL'
                  ELSE 'UNPAID'
-               END as status
+               END as status,
+               COALESCE(MAX(p.last_payment_date), null) as last_payment_date
         FROM fee_vouchers v
         JOIN student_class_history sch ON v.student_class_history_id = sch.id
         JOIN students s ON sch.student_id = s.id
@@ -791,7 +792,9 @@ class VouchersController {
         JOIN sections sec ON sch.section_id = sec.id
         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
         LEFT JOIN (
-          SELECT voucher_id, SUM(amount) as paid_total 
+          SELECT voucher_id, 
+                 SUM(amount) as paid_total,
+                 MAX(payment_date) as last_payment_date
           FROM fee_payments 
           GROUP BY voucher_id
         ) p ON v.id = p.voucher_id
@@ -1721,7 +1724,7 @@ class VouchersController {
         return ApiResponse.error(res, 'voucher_ids must be a non-empty array', 400);
       }
 
-      // Fetch all vouchers with their details
+      // Fetch all vouchers with their details including individual payment records
       const query = `
         SELECT 
           v.id,
@@ -1741,7 +1744,20 @@ class VouchersController {
               'item_type', vi.item_type,
               'amount', vi.amount
             ) ORDER BY vi.id
-          ) as items
+          ) as items,
+          COALESCE(
+            (
+              SELECT json_agg(
+                json_build_object(
+                  'amount', fp.amount,
+                  'payment_date', fp.payment_date
+                ) ORDER BY fp.payment_date, fp.created_at
+              )
+              FROM fee_payments fp
+              WHERE fp.voucher_id = v.id
+            ),
+            '[]'::json
+          ) as payments
         FROM fee_vouchers v
         JOIN student_class_history sch ON v.student_class_history_id = sch.id
         JOIN students s ON sch.student_id = s.id
@@ -1768,7 +1784,7 @@ class VouchersController {
       // Format vouchers data for PDF generation
       const vouchersData = result.rows.map(row => ({
         id: row.id,
-        voucher_no: `V-${row.id}`, // Generate voucher number from ID
+        voucher_no: `V-${row.id}`,
         student_name: row.student_name,
         father_name: row.father_name,
         father_phone: row.father_phone,
@@ -1778,7 +1794,8 @@ class VouchersController {
         month: row.month,
         items: row.items,
         total_amount: parseFloat(row.total_amount),
-        paid_amount: parseFloat(row.paid_amount) || 0
+        paid_amount: parseFloat(row.paid_amount) || 0,
+        payments: row.payments || []
       }));
 
       // Generate bulk PDF using pdf.service
