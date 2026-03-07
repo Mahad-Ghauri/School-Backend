@@ -185,7 +185,8 @@ class PDFService {
     voucherData.items.forEach(item => {
       const amount = parseFloat(item.amount);
       totalAmount += amount;
-      doc.text(item.item_type.replace('_', ' '), contentX, currentY);
+      const feeLabel = (item.item_type === 'CUSTOM' && item.description) ? item.description : item.item_type.replace('_', ' ');
+      doc.text(feeLabel, contentX, currentY);
       doc.text(`Rs. ${amount.toFixed(0)}`, contentX + contentWidth - 45, currentY);
       currentY += 9;
     });
@@ -418,7 +419,7 @@ class PDFService {
 
       // Fetch voucher items
       const itemsResult = await client.query(
-        'SELECT item_type, amount FROM fee_voucher_items WHERE voucher_id = $1 ORDER BY id',
+        'SELECT item_type, amount, description FROM fee_voucher_items WHERE voucher_id = $1 ORDER BY id',
         [voucherId]
       );
 
@@ -453,6 +454,7 @@ class PDFService {
         month: voucher.month,
         items: itemsResult.rows.map(item => ({
           item_type: item.item_type,
+          description: item.description || '',
           amount: parseFloat(item.amount)
         })),
         total_amount: totalAmount,
@@ -529,7 +531,8 @@ class PDFService {
       
       doc.fontSize(11).font('Helvetica');
       voucherData.items.forEach(item => {
-        doc.text(item.item_type.replace('_', ' '), 50, y);
+        const feeLabel = (item.item_type === 'CUSTOM' && item.description) ? item.description : item.item_type.replace('_', ' ');
+        doc.text(feeLabel, 50, y);
         doc.text(`Rs. ${item.amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
         y += 20;
       });

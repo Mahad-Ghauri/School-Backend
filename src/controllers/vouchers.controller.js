@@ -1742,6 +1742,7 @@ class VouchersController {
           json_agg(
             json_build_object(
               'item_type', vi.item_type,
+              'description', vi.description,
               'amount', vi.amount
             ) ORDER BY vi.id
           ) as items,
