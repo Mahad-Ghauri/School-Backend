@@ -296,16 +296,19 @@ class VouchersController {
 
       // 4. Arrears logic (Smart inclusion)
       const arrearsResult = await client.query(
-        `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
-         FROM fee_vouchers v
-         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-         LEFT JOIN (
-           SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
-         ) p ON v.id = p.voucher_id
-         JOIN student_class_history sch ON v.student_class_history_id = sch.id
-         WHERE sch.student_id = $1
-         AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
-        [student_id, month]
+        `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
+         FROM (
+           SELECT 
+             v.id,
+             COALESCE(SUM(vi.amount), 0) as voucher_total,
+             COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
+           FROM fee_vouchers v
+           LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+           WHERE v.student_class_history_id = $1
+             AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+           GROUP BY v.id
+         ) d`,
+        [enrollment.id, month]
       );
 
       const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
@@ -608,16 +611,19 @@ class VouchersController {
 
           // 4. Arrears logic (Smart inclusion)
           const arrearsResult = await client.query(
-            `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
-             FROM fee_vouchers v
-             JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-             LEFT JOIN (
-               SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
-             ) p ON v.id = p.voucher_id
-             JOIN student_class_history sch ON v.student_class_history_id = sch.id
-             WHERE sch.student_id = $1
-             AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
-            [student.student_id, month]
+            `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
+             FROM (
+               SELECT 
+                 v.id,
+                 COALESCE(SUM(vi.amount), 0) as voucher_total,
+                 COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
+               FROM fee_vouchers v
+               LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+               WHERE v.student_class_history_id = $1
+                 AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+               GROUP BY v.id
+             ) d`,
+            [student.enrollment_id, month]
           );
 
           const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
@@ -1383,16 +1389,19 @@ class VouchersController {
 
         // 4. Arrears logic
         const arrearsResult = await client.query(
-          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
-           FROM fee_vouchers v
-           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-           LEFT JOIN (
-             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
-           ) p ON v.id = p.voucher_id
-           JOIN student_class_history sch ON v.student_class_history_id = sch.id
-           WHERE sch.student_id = $1
-           AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
-          [student.student_id, month]
+          `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
+           FROM (
+             SELECT 
+               v.id,
+               COALESCE(SUM(vi.amount), 0) as voucher_total,
+               COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
+             FROM fee_vouchers v
+             LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+             WHERE v.student_class_history_id = $1
+               AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+             GROUP BY v.id
+           ) d`,
+          [student.enrollment_id, month]
         );
 
         const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
@@ -1495,6 +1504,10 @@ class VouchersController {
 
       // Get preview data using the same logic
       const { class_id: classId, section_id: sectionId, month: voucherMonth, fee_types: feeTypes, due_date: dueDate } = req.body;
+      const calculatedDueDate = dueDate || (() => {
+        const monthDate = new Date(voucherMonth);
+        return new Date(monthDate.getFullYear(), monthDate.getMonth(), 10);
+      })();
       
       // Get fee structure for the class
       const feeStructure = await client.query(
@@ -1523,7 +1536,7 @@ class VouchersController {
 
       // Get all enrolled students in class/section
       let query = `
-        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, s.roll_no, NULLIF(TRIM(s.phone), '') as father_phone, s.father_name, s.individual_monthly_fee
+        SELECT sch.id as enrollment_id, s.id as student_id, s.name as student_name, sch.serial_number, NULLIF(TRIM(s.phone), '') as father_phone, s.father_name, s.individual_monthly_fee
         FROM student_class_history sch
         JOIN students s ON sch.student_id = s.id
         WHERE sch.class_id = $1 
@@ -1537,7 +1550,7 @@ class VouchersController {
         params.push(sectionId);
       }
 
-      query += ` ORDER BY s.roll_no, s.name`;
+      query += ` ORDER BY sch.serial_number NULLS LAST, s.name`;
 
       const students = await client.query(query, params);
 
@@ -1628,16 +1641,19 @@ class VouchersController {
         }
 
         const arrearsResult = await client.query(
-          `SELECT SUM(vi.amount) - COALESCE(SUM(p.amount), 0) as total_due
-           FROM fee_vouchers v
-           JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-           LEFT JOIN (
-             SELECT voucher_id, SUM(amount) as amount FROM fee_payments GROUP BY voucher_id
-           ) p ON v.id = p.voucher_id
-           JOIN student_class_history sch ON v.student_class_history_id = sch.id
-           WHERE sch.student_id = $1
-           AND (DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date))`,
-          [student.student_id, voucherMonth]
+          `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
+           FROM (
+             SELECT 
+               v.id,
+               COALESCE(SUM(vi.amount), 0) as voucher_total,
+               COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
+             FROM fee_vouchers v
+             LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+             WHERE v.student_class_history_id = $1
+               AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+             GROUP BY v.id
+           ) d`,
+          [student.enrollment_id, voucherMonth]
         );
 
         const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
@@ -1669,11 +1685,12 @@ class VouchersController {
           student_name: student.student_name,
           father_name: student.father_name,
           father_phone: student.father_phone,
-          roll_no: student.roll_no,
+          serial_number: student.serial_number,
           class_name: classInfo.rows[0].class_name,
           class_type: classInfo.rows[0].class_type,
           section_name: classInfo.rows[0].section_name || 'N/A',
           month: voucherMonth,
+          due_date: calculatedDueDate,
           items: feeItems
         });
       }
@@ -1729,12 +1746,13 @@ class VouchersController {
         SELECT 
           v.id,
           v.month,
+          v.due_date,
           v.created_at,
           s.id as student_id,
           s.name as student_name,
           s.father_name,
           NULLIF(TRIM(s.phone), '') as father_phone,
-          s.roll_no,
+          sch.serial_number,
           c.name as class_name,
           sec.name as section_name,
           SUM(vi.amount) as total_amount,
@@ -1771,9 +1789,9 @@ class VouchersController {
           GROUP BY voucher_id
         ) p ON v.id = p.voucher_id
         WHERE v.id = ANY($1::int[])
-        GROUP BY v.id, v.month, v.created_at, s.id, s.name, s.father_name, s.phone,
-                 s.roll_no, c.name, sec.name
-        ORDER BY c.name, s.roll_no, s.name
+        GROUP BY v.id, v.month, v.due_date, v.created_at, s.id, s.name, s.father_name, s.phone,
+                 sch.serial_number, c.name, sec.name
+        ORDER BY c.name, sch.serial_number NULLS LAST, s.name
       `;
 
       const result = await client.query(query, [voucher_ids]);
@@ -1789,10 +1807,11 @@ class VouchersController {
         student_name: row.student_name,
         father_name: row.father_name,
         father_phone: row.father_phone,
-        roll_no: row.roll_no,
+        serial_number: row.serial_number,
         class_name: row.class_name,
         section_name: row.section_name,
         month: row.month,
+        due_date: row.due_date,
         items: row.items,
         total_amount: parseFloat(row.total_amount),
         paid_amount: parseFloat(row.paid_amount) || 0,
