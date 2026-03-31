@@ -16,8 +16,10 @@ class PDFService {
 
     // Resolve logo path from known repository locations.
     const logoCandidates = [
+      // Primary: backend-bundled asset for production environments (Render).
+      path.resolve(__dirname, '../assets/logo.png'),
+      // Fallbacks for local multi-folder workspace setups.
       path.resolve(__dirname, '../../../frontend/src/assets/logo.png'),
-      path.resolve(__dirname, '../../assets/logo.png'),
       path.resolve(__dirname, '../../../frontend/public/logo.png')
     ];
     this.logoPath = logoCandidates.find((candidate) => fs.existsSync(candidate)) || null;
