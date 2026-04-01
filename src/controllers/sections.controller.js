@@ -76,7 +76,7 @@ class SectionsController {
       `SELECT s.*, c.name as class_name, c.class_type
        FROM sections s
        JOIN classes c ON s.class_id = c.id
-       WHERE s.id = $1`,
+       WHERE s.id = $1 AND s.is_archived = false`,
       [sectionId]
     );
 
@@ -141,7 +141,7 @@ class SectionsController {
                 WHERE section_id = s.id AND end_date IS NULL) as student_count
         FROM sections s
         JOIN classes c ON s.class_id = c.id
-        WHERE 1=1
+        WHERE s.is_archived = false
       `;
 
       const params = [];
@@ -158,7 +158,7 @@ class SectionsController {
         SELECT COUNT(*)
         FROM sections s
         JOIN classes c ON s.class_id = c.id
-        WHERE 1=1
+        WHERE s.is_archived = false
       `;
       
       let countQueryWithFilters = countQuery;
@@ -204,7 +204,7 @@ class SectionsController {
                  FROM student_class_history 
                  WHERE section_id = s.id AND end_date IS NULL) as student_count
          FROM sections s
-         WHERE s.class_id = $1
+         WHERE s.class_id = $1 AND s.is_archived = false
          ORDER BY s.name`,
         [classId]
       );

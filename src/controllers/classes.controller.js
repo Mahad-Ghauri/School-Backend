@@ -113,7 +113,7 @@ class ClassesController {
 
     // Get sections count
     const sectionsResult = await client.query(
-      'SELECT COUNT(*) as section_count FROM sections WHERE class_id = $1',
+      'SELECT COUNT(*) as section_count FROM sections WHERE class_id = $1 AND is_archived = false',
       [classId]
     );
 
@@ -172,7 +172,8 @@ class ClassesController {
 
       let query = `
         SELECT c.*,
-               (SELECT COUNT(*) FROM sections WHERE class_id = c.id) as section_count,
+               (SELECT COUNT(*) FROM sections WHERE class_id = c.id AND is_archived = false) as section_count,
+               
                (SELECT COUNT(DISTINCT student_id) 
                 FROM student_class_history 
                 WHERE class_id = c.id AND end_date IS NULL) as student_count
@@ -198,7 +199,7 @@ class ClassesController {
       // Count total records
       const countQuery = query
         .replace(
-          'SELECT c.*,\n               (SELECT COUNT(*) FROM sections WHERE class_id = c.id) as section_count,\n               (SELECT COUNT(DISTINCT student_id) \n                FROM student_class_history \n                WHERE class_id = c.id AND end_date IS NULL) as student_count',
+          'SELECT c.*,\n               (SELECT COUNT(*) FROM sections WHERE class_id = c.id AND is_archived = false) as section_count,\n               (SELECT COUNT(DISTINCT student_id) \n                FROM student_class_history \n                WHERE class_id = c.id AND end_date IS NULL) as student_count',
           'SELECT COUNT(*)'
         );
       const countResult = await client.query(countQuery, params);

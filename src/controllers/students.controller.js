@@ -538,7 +538,7 @@ class StudentsController {
       const { id } = req.params;
       const {
         name, roll_no, phone, address, date_of_birth,
-        bay_form, caste, previous_school
+        bay_form, caste, previous_school, email, father_name, father_cnic, gender
       } = req.body;
 
       // Validate input
@@ -550,7 +550,11 @@ class StudentsController {
         date_of_birth: Joi.date().optional().allow(null),
         bay_form: Joi.string().optional().allow('', null),
         caste: Joi.string().optional().allow('', null),
-        previous_school: Joi.string().optional().allow('', null)
+        previous_school: Joi.string().optional().allow('', null),
+        email: Joi.string().email().optional().allow('', null),
+        father_name: Joi.string().optional().allow('', null),
+        father_cnic: Joi.string().optional().allow('', null),
+        gender: Joi.string().valid('Male', 'Female', 'Other').optional().allow('', null)
       });
 
       const { error } = schema.validate(req.body);
@@ -566,6 +570,16 @@ class StudentsController {
         );
         if (rollNoCheck.rows.length > 0) {
           return ApiResponse.error(res, 'Roll number already exists', 409);
+        }
+      }
+
+      if (email !== undefined && email) {
+        const emailCheck = await client.query(
+          'SELECT id FROM students WHERE lower(email) = lower($1) AND id != $2',
+          [email, id]
+        );
+        if (emailCheck.rows.length > 0) {
+          return ApiResponse.error(res, 'Email already exists', 409);
         }
       }
 
@@ -588,6 +602,12 @@ class StudentsController {
       if (phone !== undefined) {
         updates.push(`phone = $${paramCount}`);
         values.push(phone || null);
+        paramCount++;
+      }
+
+      if (email !== undefined) {
+        updates.push(`email = $${paramCount}`);
+        values.push(email || null);
         paramCount++;
       }
 
@@ -618,6 +638,24 @@ class StudentsController {
       if (previous_school !== undefined) {
         updates.push(`previous_school = $${paramCount}`);
         values.push(previous_school || null);
+        paramCount++;
+      }
+
+      if (father_name !== undefined) {
+        updates.push(`father_name = $${paramCount}`);
+        values.push(father_name || null);
+        paramCount++;
+      }
+
+      if (father_cnic !== undefined) {
+        updates.push(`father_cnic = $${paramCount}`);
+        values.push(father_cnic || null);
+        paramCount++;
+      }
+
+      if (gender !== undefined) {
+        updates.push(`gender = $${paramCount}`);
+        values.push(gender || null);
         paramCount++;
       }
 
@@ -1515,6 +1553,13 @@ class StudentsController {
       const currentClassId = activeEnrollment.rows[0].current_class_id;
       const promotionDateValue = promotion_date ? new Date(promotion_date) : new Date();
 
+      // Capture previous individual fee so zero-fee students remain zero after promotion.
+      const studentFeeResult = await client.query(
+        'SELECT individual_monthly_fee FROM students WHERE id = $1',
+        [id]
+      );
+      const previousIndividualFee = studentFeeResult.rows[0]?.individual_monthly_fee;
+
       // Close current class session
       await client.query(
         'UPDATE student_class_history SET end_date = $1 WHERE id = $2',
@@ -1562,11 +1607,20 @@ class StudentsController {
         [id, class_id, section_id, promotionDateValue, serialNumber]
       );
 
-      // Reset individual monthly fee so the new class fee structure is used
-      await client.query(
-        'UPDATE students SET individual_monthly_fee = NULL WHERE id = $1',
-        [id]
-      );
+      // Fee behavior on promotion:
+      // - If student fee is exactly 0, keep them fee-free.
+      // - Otherwise clear individual fee so new class fee is applied.
+      if (parseFloat(previousIndividualFee) === 0) {
+        await client.query(
+          'UPDATE students SET individual_monthly_fee = 0 WHERE id = $1',
+          [id]
+        );
+      } else {
+        await client.query(
+          'UPDATE students SET individual_monthly_fee = NULL WHERE id = $1',
+          [id]
+        );
+      }
 
       // Handle discount reset if requested
       if (reset_discount) {
@@ -1621,6 +1675,8 @@ class StudentsController {
 
       // Delete in foreign-key-safe order
       const steps = [
+        { name: 'ex_class_students', query: 'DELETE FROM ex_class_students WHERE student_id = $1', optional: true },
+        { name: 'promotion_run_students', query: 'DELETE FROM promotion_run_students WHERE student_id = $1', optional: true },
         {
           name: 'fee_payments',
           query: `DELETE FROM fee_payments WHERE voucher_id IN (
@@ -2330,6 +2386,16 @@ class StudentsController {
       // PHASE 1: Delete from all possible related tables
       // Order matters for foreign key constraints
       const deletionSteps = [
+        {
+          name: 'ex_class_students',
+          query: 'DELETE FROM ex_class_students WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
+        {
+          name: 'promotion_run_students',
+          query: 'DELETE FROM promotion_run_students WHERE student_id = ANY($1::int[])',
+          optional: true
+        },
         {
           name: 'fee_payments (via fee_vouchers)',
           query: `DELETE FROM fee_payments WHERE voucher_id IN (
