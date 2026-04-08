@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "reconcile:fees:dry": "node scripts/reconcile-old-fee-vouchers.js --dry-run",
+    "reconcile:fees:apply": "node scripts/reconcile-old-fee-vouchers.js --apply --confirm"
   },
   "keywords": [],
   "author": "",

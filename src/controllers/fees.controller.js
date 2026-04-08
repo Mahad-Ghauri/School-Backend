@@ -460,7 +460,7 @@ class FeesController {
             v.id as voucher_id,
             v.month,
             v.due_date,
-            COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
+            COALESCE(SUM(vi.amount), 0) as voucher_total,
             COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.voucher_id = v.id), 0) as paid_total
           FROM fee_vouchers v
           JOIN student_class_history sch ON v.student_class_history_id = sch.id
@@ -470,10 +470,10 @@ class FeesController {
         outstanding AS (
           SELECT
             student_id,
-            COUNT(*) FILTER (WHERE GREATEST(base_total - paid_total, 0) > 0) as total_vouchers,
-            COALESCE(SUM(base_total), 0) as total_fee,
+            COUNT(*) FILTER (WHERE GREATEST(voucher_total - paid_total, 0) > 0) as total_vouchers,
+            COALESCE(SUM(voucher_total), 0) as total_fee,
             COALESCE(SUM(paid_total), 0) as paid_amount,
-            COALESCE(SUM(GREATEST(base_total - paid_total, 0)), 0) as total_due
+            COALESCE(SUM(GREATEST(voucher_total - paid_total, 0)), 0) as total_due
           FROM voucher_financials
           GROUP BY student_id
         ),
@@ -483,7 +483,7 @@ class FeesController {
             vf.voucher_id,
             vf.month,
             vf.due_date,
-            vf.base_total,
+            vf.voucher_total,
             vf.paid_total
           FROM voucher_financials vf
           ORDER BY vf.student_id, vf.month DESC, vf.voucher_id DESC
@@ -499,7 +499,7 @@ class FeesController {
           sec.id as section_id,
           sec.name as section_name,
           o.total_vouchers,
-          lv.base_total as total_fee,
+          lv.voucher_total as total_fee,
           lv.paid_total as paid_amount,
           o.total_due as due_amount
         FROM students s
