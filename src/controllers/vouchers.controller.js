@@ -22,6 +22,43 @@ class VouchersController {
     this.bulkPrintPDF = this.bulkPrintPDF.bind(this);
   }
 
+  formatDuesMonthLabel(monthValue) {
+    const parsed = new Date(monthValue);
+    if (Number.isNaN(parsed.getTime())) return 'Dues';
+    return `Dues (${parsed.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })})`;
+  }
+
+  async getDuesBreakdownForEnrollment(client, enrollmentId, targetMonth) {
+    const duesResult = await client.query(
+      `WITH voucher_financials AS (
+         SELECT
+           v.id as voucher_id,
+           v.month,
+           COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
+           COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
+         FROM fee_vouchers v
+         LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+         WHERE v.student_class_history_id = $1
+           AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+         GROUP BY v.id, v.month
+       )
+       SELECT
+         voucher_id,
+         month,
+         GREATEST(base_total - paid_total, 0) as due_amount
+       FROM voucher_financials
+       WHERE GREATEST(base_total - paid_total, 0) > 0
+       ORDER BY month ASC, voucher_id ASC`,
+      [enrollmentId, targetMonth]
+    );
+
+    return duesResult.rows.map(row => ({
+      item_type: 'ARREARS',
+      amount: parseFloat(row.due_amount) || 0,
+      description: this.formatDuesMonthLabel(row.month)
+    }));
+  }
+
   /**
    * Generate fee voucher for a student
    * POST /api/vouchers/generate
@@ -294,36 +331,26 @@ class VouchersController {
         }
       }
 
-      // 4. Arrears logic (Smart inclusion)
-      const arrearsResult = await client.query(
-        `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
-         FROM (
-           SELECT 
-             v.id,
-             COALESCE(SUM(vi.amount), 0) as voucher_total,
-             COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
-           FROM fee_vouchers v
-           LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-           WHERE v.student_class_history_id = $1
-             AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
-           GROUP BY v.id
-         ) d`,
-        [enrollment.id, month]
-      );
-
-      const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
-      if (totalArrears > 0) {
-        feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
-      }
+      // 4. Dues logic: add month-wise dues entries.
+      const duesItems = await this.getDuesBreakdownForEnrollment(client, enrollment.id, month);
+      feeItems.push(...duesItems);
 
       // Insert fee items
       for (const item of feeItems) {
         if (item.amount !== 0) {
-          await client.query(
-            `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
-             VALUES ($1, $2, $3)`,
-            [voucher.id, item.item_type, item.amount]
-          );
+          if (item.description) {
+            await client.query(
+              `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+               VALUES ($1, $2, $3, $4)`,
+              [voucher.id, item.item_type, item.amount, item.description]
+            );
+          } else {
+            await client.query(
+              `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
+               VALUES ($1, $2, $3)`,
+              [voucher.id, item.item_type, item.amount]
+            );
+          }
         }
       }
 
@@ -609,27 +636,9 @@ class VouchersController {
             }
           }
 
-          // 4. Arrears logic (Smart inclusion)
-          const arrearsResult = await client.query(
-            `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
-             FROM (
-               SELECT 
-                 v.id,
-                 COALESCE(SUM(vi.amount), 0) as voucher_total,
-                 COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
-               FROM fee_vouchers v
-               LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-               WHERE v.student_class_history_id = $1
-                 AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
-               GROUP BY v.id
-             ) d`,
-            [student.enrollment_id, month]
-          );
-
-          const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
-          if (totalArrears > 0) {
-            feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
-          }
+          // 4. Dues logic: add month-wise dues entries.
+          const duesItems = await this.getDuesBreakdownForEnrollment(client, student.enrollment_id, month);
+          feeItems.push(...duesItems);
 
           // 5. Add custom charges if provided
           if (custom_charges && Array.isArray(custom_charges) && custom_charges.length > 0) {
@@ -1387,27 +1396,9 @@ class VouchersController {
           }
         }
 
-        // 4. Arrears logic
-        const arrearsResult = await client.query(
-          `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
-           FROM (
-             SELECT 
-               v.id,
-               COALESCE(SUM(vi.amount), 0) as voucher_total,
-               COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
-             FROM fee_vouchers v
-             LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-             WHERE v.student_class_history_id = $1
-               AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
-             GROUP BY v.id
-           ) d`,
-          [student.enrollment_id, month]
-        );
-
-        const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
-        if (totalArrears > 0) {
-          feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
-        }
+        // 4. Dues logic: add month-wise dues entries.
+        const duesItems = await this.getDuesBreakdownForEnrollment(client, student.enrollment_id, month);
+        feeItems.push(...duesItems);
 
         // 5. Add custom charges if provided
         if (custom_charges && Array.isArray(custom_charges) && custom_charges.length > 0) {
@@ -1640,26 +1631,8 @@ class VouchersController {
           feeItems.push({ item_type: 'PAPER_FUND', amount: parseFloat(effectiveFees.paper_fund) || 0 });
         }
 
-        const arrearsResult = await client.query(
-          `SELECT COALESCE(SUM(voucher_total - paid_total), 0) as total_due
-           FROM (
-             SELECT 
-               v.id,
-               COALESCE(SUM(vi.amount), 0) as voucher_total,
-               COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
-             FROM fee_vouchers v
-             LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-             WHERE v.student_class_history_id = $1
-               AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
-             GROUP BY v.id
-           ) d`,
-          [student.enrollment_id, voucherMonth]
-        );
-
-        const totalArrears = parseFloat(arrearsResult.rows[0].total_due) || 0;
-        if (totalArrears > 0) {
-          feeItems.push({ item_type: 'ARREARS', amount: totalArrears });
-        }
+        const duesItems = await this.getDuesBreakdownForEnrollment(client, student.enrollment_id, voucherMonth);
+        feeItems.push(...duesItems);
 
         const discountResult = await client.query(
           `SELECT discount_type, discount_value FROM student_discounts

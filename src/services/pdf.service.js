@@ -267,7 +267,11 @@ class PDFService {
     items.forEach(item => {
       const amount = parseFloat(item.amount);
       totalAmount += amount;
-      const feeLabel = (item.item_type === 'CUSTOM' && item.description) ? item.description : item.item_type.replace('_', ' ');
+      const feeLabel = (() => {
+        if (item.item_type === 'CUSTOM' && item.description) return item.description;
+        if (item.item_type === 'ARREARS') return item.description || 'Dues';
+        return item.item_type.replace('_', ' ');
+      })();
       doc.text(feeLabel, contentX, currentY, { width: contentWidth - 60 });
       doc.text(`Rs. ${amount.toFixed(0)}`, contentX + contentWidth - 55, currentY, { width: 55, align: 'right' });
       currentY += rowHeight;
@@ -657,7 +661,11 @@ class PDFService {
       
       doc.fontSize(11).font('Helvetica');
       voucherData.items.forEach(item => {
-        const feeLabel = (item.item_type === 'CUSTOM' && item.description) ? item.description : item.item_type.replace('_', ' ');
+        const feeLabel = (() => {
+          if (item.item_type === 'CUSTOM' && item.description) return item.description;
+          if (item.item_type === 'ARREARS') return item.description || 'Dues';
+          return item.item_type.replace('_', ' ');
+        })();
         doc.text(feeLabel, 50, y);
         doc.text(`Rs. ${item.amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
         y += 20;
