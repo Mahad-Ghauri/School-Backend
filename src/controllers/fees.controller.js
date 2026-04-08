@@ -451,7 +451,27 @@ class FeesController {
   async getDefaulters(req, res, next) {
     const client = await pool.connect();
     try {
-      const { class_id, section_id, min_due_amount = 0, overdue_only = 'false' } = req.query;
+      const {
+        class_id,
+        section_id,
+        min_due_amount = 0,
+        overdue_only = 'false',
+        month
+      } = req.query;
+
+      const params = [];
+      let paramCount = 1;
+      let voucherMonthFilterClause = '';
+
+      if (month) {
+        const normalizedMonth = /^\d{4}-\d{2}$/.test(month)
+          ? `${month}-01`
+          : month;
+
+        voucherMonthFilterClause = ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $${paramCount}::date)`;
+        params.push(normalizedMonth);
+        paramCount++;
+      }
 
       let query = `
         WITH voucher_financials AS (
@@ -465,6 +485,8 @@ class FeesController {
           FROM fee_vouchers v
           JOIN student_class_history sch ON v.student_class_history_id = sch.id
           LEFT JOIN fee_voucher_items vi ON vi.voucher_id = v.id
+          WHERE 1=1
+            ${voucherMonthFilterClause}
           GROUP BY sch.student_id, v.id, v.month, v.due_date
         ),
         outstanding AS (
@@ -512,9 +534,6 @@ class FeesController {
         WHERE s.is_active = true
           AND o.total_due > 0
       `;
-
-      const params = [];
-      let paramCount = 1;
 
       if (class_id) {
         query += ` AND sch_curr.class_id = $${paramCount}`;
