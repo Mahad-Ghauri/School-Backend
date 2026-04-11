@@ -514,13 +514,10 @@ class FeesController {
             ${voucherMonthFilterClause}
           GROUP BY sch.student_id, v.id, v.month, v.due_date
         ),
-        outstanding AS (
+        outstanding_counts AS (
           SELECT
             student_id,
-            COUNT(*) FILTER (WHERE GREATEST(voucher_total - paid_total, 0) > 0) as total_vouchers,
-            COALESCE(SUM(voucher_total), 0) as total_fee,
-            COALESCE(SUM(paid_total), 0) as paid_amount,
-            COALESCE(SUM(GREATEST(voucher_total - paid_total, 0)), 0) as total_due
+            COUNT(*) FILTER (WHERE GREATEST(voucher_total - paid_total, 0) > 0) as total_vouchers
           FROM voucher_financials
           GROUP BY student_id
         ),
@@ -531,7 +528,8 @@ class FeesController {
             vf.month,
             vf.due_date,
             vf.voucher_total,
-            vf.paid_total
+            vf.paid_total,
+            GREATEST(vf.voucher_total - vf.paid_total, 0) as due_amount
           FROM voucher_financials vf
           ORDER BY vf.student_id, vf.month DESC, vf.voucher_id DESC
         )
@@ -545,19 +543,19 @@ class FeesController {
           c.name as class_name,
           sec.id as section_id,
           sec.name as section_name,
-          o.total_vouchers,
+          oc.total_vouchers,
           lv.voucher_total as total_fee,
           lv.paid_total as paid_amount,
-          o.total_due as due_amount
+          lv.due_amount as due_amount
         FROM students s
         JOIN student_class_history sch_curr
           ON s.id = sch_curr.student_id AND sch_curr.end_date IS NULL
         JOIN classes c ON sch_curr.class_id = c.id
         JOIN sections sec ON sch_curr.section_id = sec.id
-        JOIN outstanding o ON o.student_id = s.id
+        JOIN outstanding_counts oc ON oc.student_id = s.id
         JOIN latest_voucher lv ON lv.student_id = s.id
         WHERE s.is_active = true
-          AND o.total_due > 0
+          AND lv.due_amount > 0
       `;
 
       if (class_id) {
@@ -578,7 +576,7 @@ class FeesController {
       }
 
       if (min_due_amount > 0) {
-        query += ` AND o.total_due >= $${paramCount}`;
+        query += ` AND lv.due_amount >= $${paramCount}`;
         params.push(min_due_amount);
         paramCount++;
       }
