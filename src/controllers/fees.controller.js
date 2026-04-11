@@ -345,10 +345,11 @@ class FeesController {
         student_id,
         class_id,
         section_id,
+        month,
         from_date,
         to_date,
-        page = 1,
-        limit = 50
+        page,
+        limit
       } = req.query;
 
       let query = `
@@ -390,6 +391,15 @@ class FeesController {
         paramCount++;
       }
 
+      if (month) {
+        const normalizedMonth = /^\d{4}-\d{2}$/.test(month)
+          ? `${month}-01`
+          : month;
+        query += ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $${paramCount}::date)`;
+        params.push(normalizedMonth);
+        paramCount++;
+      }
+
       if (from_date) {
         query += ` AND p.payment_date >= $${paramCount}`;
         params.push(from_date);
@@ -417,6 +427,7 @@ class FeesController {
         ${student_id ? ` AND s.id = ${student_id}` : ''}
         ${class_id ? ` AND c.id = ${class_id}` : ''}
         ${section_id ? ` AND sec.id = ${section_id}` : ''}
+        ${month ? ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', '${/^\d{4}-\d{2}$/.test(month) ? `${month}-01` : month}'::date)` : ''}
         ${from_date ? ` AND p.payment_date >= '${from_date}'` : ''}
         ${to_date ? ` AND p.payment_date <= '${to_date}'` : ''}
       `;
@@ -424,17 +435,31 @@ class FeesController {
       const countResult = await client.query(countQuery);
       const total = parseInt(countResult.rows[0].count);
 
-      // Add pagination
+      // Add ordering
       query += ` ORDER BY p.payment_date DESC, p.created_at DESC`;
-      query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
-      params.push(limit, (page - 1) * limit);
+
+      // Apply pagination only when a limit is explicitly provided.
+      // If no limit is sent, return all matching rows.
+      let pagination = null;
+      if (limit !== undefined && String(limit).trim() !== '') {
+        const limitNum = Math.max(parseInt(limit, 10) || 1, 1);
+        const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+        const offsetNum = (pageNum - 1) * limitNum;
+
+        query += ` LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+        params.push(limitNum, offsetNum);
+
+        pagination = { page: pageNum, limit: limitNum, total };
+      } else {
+        pagination = { page: 1, limit: total || 1, total };
+      }
 
       const result = await client.query(query, params);
 
       return ApiResponse.paginated(
         res,
         result.rows,
-        { page: parseInt(page), limit: parseInt(limit), total },
+        pagination,
         'Payments retrieved successfully'
       );
     } catch (error) {
