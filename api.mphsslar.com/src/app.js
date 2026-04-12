@@ -3,6 +3,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
+const fs = require('fs');
 const path = require('path');
 const { errorHandler, notFoundHandler } = require('./middleware/error.middleware');
 
@@ -26,6 +27,28 @@ const testReportsRoutes = require('./routes/testReports.routes');
 const promotionsRoutes = require('./routes/promotions.routes');
 
 const app = express();
+
+function resolveFrontendDistDir() {
+  const configured = process.env.FRONTEND_DIST_DIR;
+  const candidates = [
+    configured ? path.resolve(configured) : null,
+    path.resolve(__dirname, '..', '..', 'frontend', 'dist'),
+    path.resolve(__dirname, '..', 'frontend', 'dist'),
+    path.resolve(process.cwd(), 'frontend', 'dist'),
+    path.resolve(process.cwd(), '..', 'frontend', 'dist')
+  ].filter(Boolean);
+
+  return candidates.find((candidate) => fs.existsSync(path.join(candidate, 'index.html'))) || null;
+}
+
+const frontendDistDir = resolveFrontendDistDir();
+
+if (frontendDistDir) {
+  app.use(express.static(frontendDistDir, { index: false }));
+  console.log(`[SPA] Serving frontend from: ${frontendDistDir}`);
+} else {
+  console.warn('[SPA] Frontend dist not found. Set FRONTEND_DIST_DIR if your frontend moved.');
+}
 
 // Security middleware
 app.use(helmet());
@@ -114,6 +137,19 @@ app.use('/api/discounts', discountsRoutes);
 app.use('/api/student-fee-overrides', studentFeeOverridesRoutes);
 app.use('/api/test-reports', testReportsRoutes);
 app.use('/api/promotions', promotionsRoutes);
+
+// SPA deep-link fallback: return index.html for non-API browser routes
+app.get(/.*/, (req, res, next) => {
+  if (!frontendDistDir) return next();
+  if (req.path === '/health') return next();
+  if (req.path.startsWith('/api/')) return next();
+  if (req.path === '/api') return next();
+  if (req.path.startsWith('/uploads/')) return next();
+  if (req.path === '/uploads') return next();
+  if (!req.accepts('html')) return next();
+
+  return res.sendFile(path.join(frontendDistDir, 'index.html'));
+});
 
 // 404 handler
 app.use(notFoundHandler);
