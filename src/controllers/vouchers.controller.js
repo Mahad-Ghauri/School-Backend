@@ -28,6 +28,109 @@ class VouchersController {
     return `Dues (${parsed.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })})`;
   }
 
+  isSystemGeneratedDuesDescription(description) {
+    if (typeof description !== 'string') return false;
+    const normalized = description.trim();
+    return normalized.startsWith('Dues (') && normalized.endsWith(')') && normalized.length === 15;
+  }
+
+  normalizeVoucherItemsForPersistence(items = []) {
+    return items.map((rawItem) => {
+      const trimmedDescription = typeof rawItem.description === 'string'
+        ? rawItem.description.trim()
+        : '';
+
+      // Manual dues must be billable base items so outstanding reflects them correctly.
+      if (rawItem.item_type === 'ARREARS' && !this.isSystemGeneratedDuesDescription(trimmedDescription)) {
+        return {
+          item_type: 'CUSTOM',
+          amount: rawItem.amount,
+          description: trimmedDescription || 'Dues'
+        };
+      }
+
+      if (rawItem.item_type === 'CUSTOM') {
+        return {
+          item_type: 'CUSTOM',
+          amount: rawItem.amount,
+          description: trimmedDescription || 'Dues'
+        };
+      }
+
+      return {
+        item_type: rawItem.item_type,
+        amount: rawItem.amount,
+        ...(trimmedDescription ? { description: trimmedDescription } : {})
+      };
+    });
+  }
+
+  async resyncStudentVoucherDues(client, studentId) {
+    const vouchersResult = await client.query(
+      `WITH student_vouchers AS (
+         SELECT v.id as voucher_id, v.month
+         FROM fee_vouchers v
+         JOIN student_class_history sch ON v.student_class_history_id = sch.id
+         WHERE sch.student_id = $1
+       ),
+       base_totals AS (
+         SELECT voucher_id, COALESCE(SUM(amount), 0) as base_total
+         FROM fee_voucher_items
+         WHERE item_type <> 'ARREARS'
+         GROUP BY voucher_id
+       ),
+       payment_totals AS (
+         SELECT voucher_id, COALESCE(SUM(amount), 0) as paid_total
+         FROM fee_payments
+         GROUP BY voucher_id
+       )
+       SELECT sv.voucher_id,
+              sv.month,
+              COALESCE(bt.base_total, 0) as base_total,
+              COALESCE(pt.paid_total, 0) as paid_total,
+              GREATEST(COALESCE(bt.base_total, 0) - COALESCE(pt.paid_total, 0), 0) as outstanding
+       FROM student_vouchers sv
+       LEFT JOIN base_totals bt ON bt.voucher_id = sv.voucher_id
+       LEFT JOIN payment_totals pt ON pt.voucher_id = sv.voucher_id
+       ORDER BY sv.month ASC, sv.voucher_id ASC`,
+      [studentId]
+    );
+
+    const vouchers = vouchersResult.rows;
+
+    for (const current of vouchers) {
+      await client.query(
+        `DELETE FROM fee_voucher_items
+         WHERE voucher_id = $1 AND item_type = 'ARREARS'`,
+        [current.voucher_id]
+      );
+
+      const currentMonth = new Date(current.month);
+      if (Number.isNaN(currentMonth.getTime())) continue;
+
+      const duesFromPrevious = vouchers.filter(prev => {
+        const prevMonth = new Date(prev.month);
+        return (
+          !Number.isNaN(prevMonth.getTime()) &&
+          prevMonth < currentMonth &&
+          (parseFloat(prev.outstanding) || 0) > 0
+        );
+      });
+
+      for (const due of duesFromPrevious) {
+        await client.query(
+          `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
+           VALUES ($1, 'ARREARS', $2, $3)`,
+          [
+            current.voucher_id,
+            parseFloat(due.outstanding) || 0,
+            this.formatDuesMonthLabel(due.month)
+          ]
+        );
+      }
+    }
+  }
+
   async getDuesBreakdownForEnrollment(client, enrollmentId, targetMonth) {
     const duesResult = await client.query(
       `WITH voucher_financials AS (
@@ -791,6 +894,7 @@ class VouchersController {
                c.name as class_name,
                sec.id as section_id,
                sec.name as section_name,
+               CASE WHEN latest_voucher.voucher_id = v.id THEN true ELSE false END as is_latest_for_student,
                SUM(vi.amount) as total_fee,
                COALESCE(MAX(p.paid_total), 0) as paid_amount,
                SUM(vi.amount) - COALESCE(MAX(p.paid_total), 0) as due_amount,
@@ -806,6 +910,20 @@ class VouchersController {
         JOIN classes c ON sch.class_id = c.id
         JOIN sections sec ON sch.section_id = sec.id
         JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+        LEFT JOIN (
+          SELECT ranked.student_id, ranked.voucher_id
+          FROM (
+            SELECT sch_inner.student_id,
+                   v_inner.id as voucher_id,
+                   ROW_NUMBER() OVER (
+                     PARTITION BY sch_inner.student_id
+                     ORDER BY v_inner.month DESC, v_inner.created_at DESC, v_inner.id DESC
+                   ) as rn
+            FROM fee_vouchers v_inner
+            JOIN student_class_history sch_inner ON v_inner.student_class_history_id = sch_inner.id
+          ) ranked
+          WHERE ranked.rn = 1
+        ) latest_voucher ON latest_voucher.student_id = s.id
         LEFT JOIN (
           SELECT voucher_id, 
                  SUM(amount) as paid_total,
@@ -855,7 +973,7 @@ class VouchersController {
         paramCount++;
       }
 
-      query += ` GROUP BY v.id, v.month, v.created_at, v.voucher_type, s.id, s.name, s.father_name, s.phone, s.roll_no, c.id, c.name, sec.id, sec.name`;
+      query += ` GROUP BY v.id, v.month, v.created_at, v.voucher_type, s.id, s.name, s.father_name, s.phone, s.roll_no, c.id, c.name, sec.id, sec.name, latest_voucher.voucher_id`;
 
       // Apply status filter after grouping
       if (status) {
@@ -1024,15 +1142,19 @@ class VouchersController {
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
+      const normalizedItems = this.normalizeVoucherItemsForPersistence(items);
+
       // Check if voucher exists and get its type and payment status
       const voucherCheck = await client.query(
         `SELECT v.id,
                 v.voucher_type,
+                sch.student_id,
                 COALESCE(SUM(p.amount), 0) as paid_amount
          FROM fee_vouchers v
+         JOIN student_class_history sch ON v.student_class_history_id = sch.id
          LEFT JOIN fee_payments p ON v.id = p.voucher_id
          WHERE v.id = $1
-         GROUP BY v.id, v.voucher_type`,
+         GROUP BY v.id, v.voucher_type, sch.student_id`,
         [id]
       );
 
@@ -1060,8 +1182,8 @@ class VouchersController {
       );
 
       // Insert new items
-      for (const item of items) {
-        if (item.description && item.item_type === 'CUSTOM') {
+      for (const item of normalizedItems) {
+        if (item.description && (item.item_type === 'CUSTOM' || item.item_type === 'ARREARS')) {
           await client.query(
             `INSERT INTO fee_voucher_items (voucher_id, item_type, amount, description)
              VALUES ($1, $2, $3, $4)`,
@@ -1075,6 +1197,8 @@ class VouchersController {
           );
         }
       }
+
+      await this.resyncStudentVoucherDues(client, voucherCheck.rows[0].student_id);
 
       await client.query('COMMIT');
 
