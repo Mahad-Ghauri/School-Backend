@@ -438,6 +438,8 @@ class VouchersController {
       const duesItems = await this.getDuesBreakdownForEnrollment(client, enrollment.id, month);
       feeItems.push(...duesItems);
 
+      let persistedItemCount = 0;
+
       // Insert fee items
       for (const item of feeItems) {
         if (item.amount !== 0) {
@@ -447,12 +449,14 @@ class VouchersController {
                VALUES ($1, $2, $3, $4)`,
               [voucher.id, item.item_type, item.amount, item.description]
             );
+            persistedItemCount++;
           } else {
             await client.query(
               `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
                VALUES ($1, $2, $3)`,
               [voucher.id, item.item_type, item.amount]
             );
+            persistedItemCount++;
           }
         }
       }
@@ -483,6 +487,7 @@ class VouchersController {
              VALUES ($1, 'DISCOUNT', $2)`,
             [voucher.id, -discountAmount] // Negative amount for discount
           );
+          persistedItemCount++;
         }
       }
 
@@ -495,13 +500,24 @@ class VouchersController {
              VALUES ($1, $2, $3, $4)`,
             [voucher.id, itemType, item.amount, item.description]
           );
+          persistedItemCount++;
         } else {
           await client.query(
             `INSERT INTO fee_voucher_items (voucher_id, item_type, amount)
              VALUES ($1, $2, $3)`,
             [voucher.id, itemType, item.amount]
           );
+          persistedItemCount++;
         }
+      }
+
+      if (persistedItemCount === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          'Voucher cannot be generated because all computed fee amounts are zero. Please verify monthly fee setup for this student.',
+          400
+        );
       }
 
       await client.query('COMMIT');
@@ -624,6 +640,7 @@ class VouchersController {
 
       // Generate voucher for each student
       for (const student of students.rows) {
+        await client.query('SAVEPOINT bulk_voucher_student');
         try {
           // Duplicate voucher check removed - allowing multiple vouchers per month
           // const duplicateCheck = await client.query(
@@ -743,6 +760,8 @@ class VouchersController {
           const duesItems = await this.getDuesBreakdownForEnrollment(client, student.enrollment_id, month);
           feeItems.push(...duesItems);
 
+          let persistedItemCount = 0;
+
           // 5. Add custom charges if provided
           if (custom_charges && Array.isArray(custom_charges) && custom_charges.length > 0) {
             for (const charge of custom_charges) {
@@ -776,6 +795,7 @@ class VouchersController {
                    VALUES ($1, $2, $3, $4)`,
                   [voucher.id, item.item_type, item.amount, item.description]
                 );
+                persistedItemCount++;
               } else {
                 // Insert without description for standard items
                 await client.query(
@@ -783,6 +803,7 @@ class VouchersController {
                    VALUES ($1, $2, $3)`,
                   [voucher.id, item.item_type, item.amount]
                 );
+                persistedItemCount++;
               }
             }
           }
@@ -813,8 +834,22 @@ class VouchersController {
                  VALUES ($1, 'DISCOUNT', $2)`,
                 [voucher.id, -discountAmount] // Negative amount for discount
               );
+              persistedItemCount++;
             }
           }
+
+          if (persistedItemCount === 0) {
+            await client.query('ROLLBACK TO SAVEPOINT bulk_voucher_student');
+            await client.query('RELEASE SAVEPOINT bulk_voucher_student');
+            results.skipped.push({
+              student_id: student.student_id,
+              student_name: student.student_name,
+              reason: 'No fee items generated because all computed fee amounts are zero'
+            });
+            continue;
+          }
+
+          await client.query('RELEASE SAVEPOINT bulk_voucher_student');
 
           results.generated.push({
             student_id: student.student_id,
@@ -822,6 +857,8 @@ class VouchersController {
             voucher_id: voucher.id
           });
         } catch (itemError) {
+          await client.query('ROLLBACK TO SAVEPOINT bulk_voucher_student');
+          await client.query('RELEASE SAVEPOINT bulk_voucher_student');
           results.failed.push({
             student_id: student.student_id,
             student_name: student.student_name,
@@ -895,11 +932,11 @@ class VouchersController {
                sec.id as section_id,
                sec.name as section_name,
                CASE WHEN latest_voucher.voucher_id = v.id THEN true ELSE false END as is_latest_for_student,
-               SUM(vi.amount) as total_fee,
+               COALESCE(SUM(vi.amount), 0) as total_fee,
                COALESCE(MAX(p.paid_total), 0) as paid_amount,
-               SUM(vi.amount) - COALESCE(MAX(p.paid_total), 0) as due_amount,
+               COALESCE(SUM(vi.amount), 0) - COALESCE(MAX(p.paid_total), 0) as due_amount,
                CASE 
-                 WHEN SUM(vi.amount) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
+                 WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
                  WHEN COALESCE(MAX(p.paid_total), 0) > 0 THEN 'PARTIAL'
                  ELSE 'UNPAID'
                END as status,
@@ -909,7 +946,7 @@ class VouchersController {
         JOIN students s ON sch.student_id = s.id
         JOIN classes c ON sch.class_id = c.id
         JOIN sections sec ON sch.section_id = sec.id
-        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+        LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
         LEFT JOIN (
           SELECT ranked.student_id, ranked.voucher_id
           FROM (
@@ -978,9 +1015,9 @@ class VouchersController {
       // Apply status filter after grouping
       if (status) {
         const statusMap = {
-          'PAID': 'SUM(vi.amount) <= COALESCE(MAX(p.paid_total), 0)',
+          'PAID': 'COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0)',
           'UNPAID': 'COALESCE(MAX(p.paid_total), 0) = 0',
-          'PARTIAL': 'COALESCE(MAX(p.paid_total), 0) > 0 AND SUM(vi.amount) > COALESCE(MAX(p.paid_total), 0)'
+          'PARTIAL': 'COALESCE(MAX(p.paid_total), 0) > 0 AND COALESCE(SUM(vi.amount), 0) > COALESCE(MAX(p.paid_total), 0)'
         };
         if (statusMap[status.toUpperCase()]) {
           query += ` HAVING ${statusMap[status.toUpperCase()]}`;
@@ -1077,11 +1114,14 @@ class VouchersController {
               c.name as class_name,
               sec.id as section_id,
               sec.name as section_name,
-              json_agg(json_build_object(
-                'item_type', vi.item_type,
-                'amount', vi.amount,
-                'description', vi.description
-              )) as items,
+              COALESCE(
+                json_agg(json_build_object(
+                  'item_type', vi.item_type,
+                  'amount', vi.amount,
+                  'description', vi.description
+                )) FILTER (WHERE vi.voucher_id IS NOT NULL),
+                '[]'::json
+              ) as items,
               (SELECT json_agg(json_build_object(
                 'id', p.id,
                 'amount', p.amount,
@@ -1090,11 +1130,11 @@ class VouchersController {
               ))
               FROM fee_payments p
               WHERE p.voucher_id = v.id) as payments,
-              SUM(vi.amount) as total_fee,
+              COALESCE(SUM(vi.amount), 0) as total_fee,
               COALESCE(pt.paid_amount, 0) as paid_amount,
-              SUM(vi.amount) - COALESCE(pt.paid_amount, 0) as due_amount,
+              COALESCE(SUM(vi.amount), 0) - COALESCE(pt.paid_amount, 0) as due_amount,
               CASE 
-                WHEN SUM(vi.amount) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
+                WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
                 WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
                 ELSE 'UNPAID'
               END as status
@@ -1103,7 +1143,7 @@ class VouchersController {
        JOIN students s ON sch.student_id = s.id
        JOIN classes c ON sch.class_id = c.id
        JOIN sections sec ON sch.section_id = sec.id
-       JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+      LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
        LEFT JOIN PaymentTotal pt ON v.id = pt.voucher_id
        WHERE v.id = $1
        GROUP BY v.id, v.month, v.due_date, v.created_at, v.voucher_type, s.id, s.name, s.father_name, s.roll_no, s.phone, 
@@ -1852,14 +1892,17 @@ class VouchersController {
           sch.serial_number,
           c.name as class_name,
           sec.name as section_name,
-          SUM(vi.amount) as total_amount,
+          COALESCE(SUM(vi.amount), 0) as total_amount,
           COALESCE(MAX(p.paid_total), 0) as paid_amount,
-          json_agg(
-            json_build_object(
-              'item_type', vi.item_type,
-              'description', vi.description,
-              'amount', vi.amount
-            ) ORDER BY vi.id
+          COALESCE(
+            json_agg(
+              json_build_object(
+                'item_type', vi.item_type,
+                'description', vi.description,
+                'amount', vi.amount
+              ) ORDER BY vi.id
+            ) FILTER (WHERE vi.voucher_id IS NOT NULL),
+            '[]'::json
           ) as items,
           COALESCE(
             (
@@ -1879,7 +1922,7 @@ class VouchersController {
         JOIN students s ON sch.student_id = s.id
         JOIN classes c ON sch.class_id = c.id
         LEFT JOIN sections sec ON sch.section_id = sec.id
-        JOIN fee_voucher_items vi ON v.id = vi.voucher_id
+        LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
         LEFT JOIN (
           SELECT voucher_id, SUM(amount) as paid_total 
           FROM fee_payments 
