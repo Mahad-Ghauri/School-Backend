@@ -376,7 +376,7 @@ class StudentsController {
                COALESCE(s.individual_monthly_fee, cfs.monthly_fee, 0) as effective_monthly_fee,
                CASE 
                  WHEN c.class_type = 'COLLEGE' THEN 
-                   COALESCE(yearly_package.amount, 0) - COALESCE(total_payments.amount, 0)
+                   GREATEST(COALESCE(yearly_package.amount, 0) - COALESCE(total_payments.amount, 0), 0)
                  ELSE 0 
                END as pending_amount,
                COALESCE(yearly_package.amount, 0) as yearly_package_amount,
@@ -395,7 +395,7 @@ class StudentsController {
         LEFT JOIN guardians g ON sg.guardian_id = g.id
         -- College fee calculation joins (across ALL enrollments, not just current)
         LEFT JOIN LATERAL (
-          SELECT COALESCE(SUM(fvi.amount), 0) as amount
+          SELECT COALESCE(SUM(CASE WHEN fvi.item_type <> 'ARREARS' THEN fvi.amount ELSE 0 END), 0) as amount
           FROM student_class_history sch_all
           JOIN fee_vouchers fv ON fv.student_class_history_id = sch_all.id
           JOIN fee_voucher_items fvi ON fv.id = fvi.voucher_id

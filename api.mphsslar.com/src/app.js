@@ -86,39 +86,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Bulk import - NO AUTH - placed before all route middleware
-const studentsController = require('./controllers/students.controller');
-app.post('/api/students/bulk-noauth', studentsController.bulkCreate);
-app.post('/api/students/bulk-update-noauth', studentsController.bulkUpdate); // Update existing students
-
-// Test bulk delete endpoint directly in app.js - NO AUTH
-app.post('/api/test-bulk-delete-direct', (req, res) => {
-  console.log('🧪 Direct bulk delete test called with:', req.body);
-  res.json({ 
-    message: 'Direct bulk delete test endpoint reached', 
-    receivedData: req.body,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Bulk delete endpoint - NO AUTH (completely separate from students router)
-app.post('/api/bulk-delete-students', async (req, res, next) => {
-  console.log('🗑️ NO-AUTH bulk delete called with:', req.body);
-  try {
-    await studentsController.bulkDelete(req, res, next);
-  } catch (error) {
-    console.error('❌ Direct bulk delete error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Bulk delete failed: ' + error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Test actual bulk delete without auth
-app.post('/api/students/bulk-delete-noauth', studentsController.bulkDelete);
-
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentsRoutes);

@@ -265,11 +265,15 @@ class PDFService {
 
     doc.fontSize(defaultItemFontSize).font('Helvetica');
     let totalAmount = 0;
+    let billableAmount = 0;
     const voucherBottomY = y + height - padding;
     
     items.forEach(item => {
       const amount = parseFloat(item.amount);
       totalAmount += amount;
+      if (item.item_type !== 'ARREARS') {
+        billableAmount += amount;
+      }
       const feeLabel = (() => {
         if (item.item_type === 'CUSTOM' && item.description) return item.description;
         if (item.item_type === 'ARREARS') return item.description || 'Dues';
@@ -294,12 +298,12 @@ class PDFService {
 
     // Show paid/pending totals
     const paidAmt = parseFloat(voucherData.paid_amount) || 0;
-    const pendingAmt = Math.max(totalAmount - paidAmt, 0);
+    const pendingAmt = Math.max(billableAmount - paidAmt, 0);
     if (paidAmt > 0) {
       doc.moveTo(contentX, currentY).lineTo(contentX + contentWidth, currentY).stroke();
       currentY += midGap;
 
-      if (paidAmt < totalAmount) {
+      if (paidAmt < billableAmount) {
         doc.fontSize(tableBodyFont).font('Helvetica-Bold');
         doc.fillColor('#059669').text('Paid:', contentX, currentY);
         doc.text(`Rs. ${paidAmt.toFixed(0)}`, contentX + contentWidth - 55, currentY, { width: 55, align: 'right' });
@@ -384,7 +388,7 @@ class PDFService {
     });
     
     // Add "PAID" watermark if voucher is fully paid
-    if (voucherData.paid_amount && voucherData.paid_amount >= totalAmount) {
+    if (billableAmount > 0 && voucherData.paid_amount && voucherData.paid_amount >= billableAmount) {
       doc.save();
       
       // Calculate center position for the watermark
@@ -548,8 +552,12 @@ class PDFService {
 
       // Calculate totals
       const totalAmount = itemsResult.rows.reduce((sum, item) => sum + parseFloat(item.amount), 0);
+      const billableAmount = itemsResult.rows.reduce(
+        (sum, item) => (item.item_type === 'ARREARS' ? sum : sum + parseFloat(item.amount)),
+        0
+      );
       const totalPaid = paymentsResult.rows.reduce((sum, payment) => sum + parseFloat(payment.amount), 0);
-      const balance = totalAmount - totalPaid;
+      const balance = Math.max(billableAmount - totalPaid, 0);
 
       // Create PDF - single voucher centered on page
       const doc = new PDFDocument({ size: 'A4', margin: 50 });
@@ -576,6 +584,7 @@ class PDFService {
           amount: parseFloat(item.amount)
         })),
         total_amount: totalAmount,
+        billable_amount: billableAmount,
         paid_amount: totalPaid,
         balance: balance
       };
@@ -690,8 +699,8 @@ class PDFService {
       y += 46;
 
       // Show paid/pending for partial payments
-      if (voucherData.paid_amount > 0 && voucherData.paid_amount < voucherData.total_amount) {
-        const pendingAmount = voucherData.total_amount - voucherData.paid_amount;
+      if (voucherData.paid_amount > 0 && voucherData.paid_amount < voucherData.billable_amount) {
+        const pendingAmount = Math.max(voucherData.billable_amount - voucherData.paid_amount, 0);
         doc.fontSize(11).font('Helvetica-Bold');
         doc.fillColor('#059669').text('Paid Amount:', 50, y);
         doc.text(`Rs. ${voucherData.paid_amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
@@ -728,11 +737,11 @@ class PDFService {
 
         // Individual payment rows
         doc.fontSize(10).font('Helvetica');
-        let runningBalance = voucherData.total_amount;
+        let runningBalance = voucherData.billable_amount;
 
         paymentsResult.rows.forEach((payment, index) => {
           const paymentAmount = parseFloat(payment.amount);
-          runningBalance -= paymentAmount;
+          runningBalance = Math.max(runningBalance - paymentAmount, 0);
 
           const dateStr = new Date(payment.payment_date).toLocaleDateString('en-PK', {
             weekday: 'short',
@@ -779,7 +788,7 @@ class PDFService {
          .text('This is a computer-generated document.', 50, 765, { align: 'center', italic: true });
 
       // Add "PAID" watermark if voucher is fully paid
-      if (voucherData.paid_amount >= voucherData.total_amount) {
+      if (voucherData.billable_amount > 0 && voucherData.paid_amount >= voucherData.billable_amount) {
         doc.save();
         
         // Position watermark in center of page

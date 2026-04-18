@@ -42,7 +42,7 @@ class AnalyticsController {
         WITH voucher_totals AS (
           SELECT 
             v.id,
-            SUM(vi.amount) as voucher_total,
+            SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END) as voucher_total,
             COALESCE((SELECT SUM(amount) FROM fee_payments WHERE voucher_id = v.id), 0) as paid_amount
           FROM fee_vouchers v
           LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
@@ -164,7 +164,10 @@ class AnalyticsController {
               : 0,
             total_generated: parseFloat(feeStats.rows[0].total_fee_generated),
             total_collected: parseFloat(feeStats.rows[0].total_collected),
-            pending: parseFloat(feeStats.rows[0].total_fee_generated) - parseFloat(feeStats.rows[0].total_collected)
+            pending: Math.max(
+              parseFloat(feeStats.rows[0].total_fee_generated) - parseFloat(feeStats.rows[0].total_collected),
+              0
+            )
           }
         },
         salaries: {
@@ -176,7 +179,10 @@ class AnalyticsController {
               : 0,
             total_generated: parseFloat(salaryStats.rows[0].total_salary_generated),
             total_paid: parseFloat(salaryStats.rows[0].total_paid),
-            pending: parseFloat(salaryStats.rows[0].total_salary_generated) - parseFloat(salaryStats.rows[0].total_paid)
+            pending: Math.max(
+              parseFloat(salaryStats.rows[0].total_salary_generated) - parseFloat(salaryStats.rows[0].total_paid),
+              0
+            )
           }
         },
         today: {
@@ -305,7 +311,7 @@ class AnalyticsController {
           SELECT 
             sch.class_id,
             v.id as voucher_id,
-            SUM(vi.amount) as voucher_amount,
+            SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END) as voucher_amount,
             v.status,
             COALESCE(
               (SELECT SUM(fp.amount) 
@@ -325,7 +331,7 @@ class AnalyticsController {
           COUNT(DISTINCT vd.voucher_id) FILTER (WHERE vd.voucher_id IS NOT NULL) as total_vouchers,
           COALESCE(SUM(vd.voucher_amount), 0) as total_generated,
           COALESCE(SUM(vd.paid_amount), 0) as total_collected,
-          COALESCE(SUM(vd.voucher_amount - vd.paid_amount), 0) as total_pending,
+          COALESCE(SUM(GREATEST(vd.voucher_amount - vd.paid_amount, 0)), 0) as total_pending,
           CASE 
             WHEN SUM(vd.voucher_amount) > 0 
             THEN ROUND((SUM(vd.paid_amount) / SUM(vd.voucher_amount) * 100)::numeric, 1)
@@ -603,7 +609,7 @@ class AnalyticsController {
           TO_CHAR(dr.month, 'Mon YYYY') as label,
           TO_CHAR(dr.month, 'YYYY-MM') as month_key,
           COALESCE((
-            SELECT SUM(vi.amount)
+            SELECT SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END)
             FROM fee_voucher_items vi
             JOIN fee_vouchers v ON vi.voucher_id = v.id
             WHERE DATE_TRUNC('month', v.month) = dr.month
@@ -616,7 +622,7 @@ class AnalyticsController {
           ), 0) as actual,
           CASE 
             WHEN COALESCE((
-              SELECT SUM(vi.amount)
+              SELECT SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END)
               FROM fee_voucher_items vi
               JOIN fee_vouchers v ON vi.voucher_id = v.id
               WHERE DATE_TRUNC('month', v.month) = dr.month
@@ -629,7 +635,7 @@ class AnalyticsController {
                   AND fp.payment_date >= $1 AND fp.payment_date <= $2
               ), 0) * 100.0 / 
               COALESCE((
-                SELECT SUM(vi.amount)
+                SELECT SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END)
                 FROM fee_voucher_items vi
                 JOIN fee_vouchers v ON vi.voucher_id = v.id
                 WHERE DATE_TRUNC('month', v.month) = dr.month

@@ -28,6 +28,14 @@ class FeesController {
     return Number.isFinite(parsed) ? parsed : 0;
   }
 
+  toCents(value) {
+    return Math.round(this.toAmount(value) * 100);
+  }
+
+  fromCents(cents) {
+    return (Number.isFinite(cents) ? cents : 0) / 100;
+  }
+
   formatDuesMonthLabel(monthValue) {
     const parsed = new Date(monthValue);
     if (Number.isNaN(parsed.getTime())) return 'Dues';
@@ -125,50 +133,46 @@ class FeesController {
 
       const { error } = schema.validate(req.body);
       if (error) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
       // Check voucher and fetch owner student context.
       const voucherCheck = await client.query(
-        `WITH VoucherTotals AS (
-           SELECT voucher_id, SUM(amount) as total_fee
-           FROM fee_voucher_items
-           WHERE voucher_id = $1
-           GROUP BY voucher_id
-         ),
-         PaymentTotals AS (
-           SELECT voucher_id, SUM(amount) as paid_amount
-           FROM fee_payments
-           WHERE voucher_id = $1
-           GROUP BY voucher_id
-         )
-         SELECT v.id,
-                v.month,
-                sch.student_id,
-                COALESCE(vt.total_fee, 0) as total_fee,
-                COALESCE(pt.paid_amount, 0) as paid_amount
+        `SELECT v.id, v.month, sch.student_id
          FROM fee_vouchers v
          JOIN student_class_history sch ON v.student_class_history_id = sch.id
-         LEFT JOIN VoucherTotals vt ON v.id = vt.voucher_id
-         LEFT JOIN PaymentTotals pt ON v.id = pt.voucher_id
          WHERE v.id = $1`,
         [voucher_id]
       );
 
       if (voucherCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Fee voucher not found', 404);
       }
 
       const selectedVoucher = voucherCheck.rows[0];
 
+      // Serialize payment writes per student to avoid concurrent over-allocation.
+      await client.query(
+        `SELECT v.id
+         FROM fee_vouchers v
+         JOIN student_class_history sch ON v.student_class_history_id = sch.id
+         WHERE sch.student_id = $1
+         FOR UPDATE`,
+        [selectedVoucher.student_id]
+      );
+
       let allocationQuery = `
         WITH voucher_totals AS (
-          SELECT voucher_id, SUM(amount) as total_fee
+          SELECT voucher_id,
+                 COALESCE(SUM(CASE WHEN item_type <> 'ARREARS' THEN amount ELSE 0 END), 0) as total_fee
           FROM fee_voucher_items
           GROUP BY voucher_id
         ),
         payment_totals AS (
-          SELECT voucher_id, SUM(amount) as paid_amount
+          SELECT voucher_id,
+                 COALESCE(SUM(amount), 0) as paid_amount
           FROM fee_payments
           GROUP BY voucher_id
         )
@@ -176,7 +180,7 @@ class FeesController {
                v.month,
                COALESCE(vt.total_fee, 0) as total_fee,
                COALESCE(pt.paid_amount, 0) as paid_amount,
-               COALESCE(vt.total_fee, 0) - COALESCE(pt.paid_amount, 0) as due_amount
+               GREATEST(COALESCE(vt.total_fee, 0) - COALESCE(pt.paid_amount, 0), 0) as due_amount
         FROM fee_vouchers v
         JOIN student_class_history sch ON v.student_class_history_id = sch.id
         LEFT JOIN voucher_totals vt ON vt.voucher_id = v.id
@@ -186,11 +190,7 @@ class FeesController {
 
       const allocationParams = [selectedVoucher.student_id];
 
-      // Core rule: a payment on any voucher settles oldest dues first,
-      // up to the selected voucher month.
-      allocationQuery += ` AND DATE_TRUNC('month', v.month) <= DATE_TRUNC('month', $2::date)`;
-      allocationParams.push(selectedVoucher.month);
-
+      // Core rule: one payment settles student dues oldest-first across vouchers.
       allocationQuery += `
         AND COALESCE(vt.total_fee, 0) > COALESCE(pt.paid_amount, 0)
         ORDER BY v.month ASC, v.id ASC
@@ -200,42 +200,248 @@ class FeesController {
       const vouchersToAllocate = allocationResult.rows;
 
       if (vouchersToAllocate.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'No pending due found for this voucher', 400);
       }
 
-      const totalAllocatableDue = vouchersToAllocate.reduce(
-        (sum, row) => sum + this.toAmount(row.due_amount),
-        0
+      // Keep oldest-first order but guard against any duplicate rows from upstream joins.
+      const orderedUniqueVouchers = [];
+      const seenVoucherIds = new Set();
+      for (const voucher of vouchersToAllocate) {
+        const voucherId = parseInt(voucher.voucher_id, 10);
+        if (!Number.isFinite(voucherId) || seenVoucherIds.has(voucherId)) continue;
+        seenVoucherIds.add(voucherId);
+        orderedUniqueVouchers.push({ ...voucher, voucher_id: voucherId });
+      }
+
+      if (orderedUniqueVouchers.length === 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(res, 'No pending due found for this voucher', 400);
+      }
+
+      const liveDueResult = await client.query(
+        `WITH base_totals AS (
+           SELECT voucher_id,
+                  COALESCE(SUM(CASE WHEN item_type <> 'ARREARS' THEN amount ELSE 0 END), 0) as base_total
+           FROM fee_voucher_items
+           WHERE voucher_id = ANY($1::int[])
+           GROUP BY voucher_id
+         ),
+         payment_totals AS (
+           SELECT voucher_id,
+                  COALESCE(SUM(amount), 0) as paid_total
+           FROM fee_payments
+           WHERE voucher_id = ANY($1::int[])
+           GROUP BY voucher_id
+         )
+         SELECT v.id as voucher_id,
+                GREATEST(COALESCE(bt.base_total, 0) - COALESCE(pt.paid_total, 0), 0) as live_due_amount
+         FROM fee_vouchers v
+         LEFT JOIN base_totals bt ON bt.voucher_id = v.id
+         LEFT JOIN payment_totals pt ON pt.voucher_id = v.id
+         WHERE v.id = ANY($1::int[])`,
+        [orderedUniqueVouchers.map((voucher) => voucher.voucher_id)]
       );
 
-      if (this.toAmount(amount) > totalAllocatableDue) {
+      const liveDueByVoucher = new Map(
+        liveDueResult.rows
+          .map((row) => [parseInt(row.voucher_id, 10), this.toCents(row.live_due_amount)])
+          .filter(([voucherId]) => Number.isFinite(voucherId))
+      );
+
+      const refreshVoucherLiveDueCents = async (targetVoucherId) => {
+        const refreshed = await client.query(
+          `WITH base_totals AS (
+             SELECT voucher_id,
+                    COALESCE(SUM(CASE WHEN item_type <> 'ARREARS' THEN amount ELSE 0 END), 0) as base_total
+             FROM fee_voucher_items
+             WHERE voucher_id = $1
+             GROUP BY voucher_id
+           ),
+           payment_totals AS (
+             SELECT voucher_id,
+                    COALESCE(SUM(amount), 0) as paid_total
+             FROM fee_payments
+             WHERE voucher_id = $1
+             GROUP BY voucher_id
+           )
+           SELECT v.id as voucher_id,
+                  GREATEST(COALESCE(bt.base_total, 0) - COALESCE(pt.paid_total, 0), 0) as live_due_amount
+           FROM fee_vouchers v
+           LEFT JOIN base_totals bt ON bt.voucher_id = v.id
+           LEFT JOIN payment_totals pt ON pt.voucher_id = v.id
+           WHERE v.id = $1`,
+          [targetVoucherId]
+        );
+
+        const refreshedDueCents = refreshed.rows.length > 0
+          ? this.toCents(refreshed.rows[0].live_due_amount)
+          : 0;
+
+        liveDueByVoucher.set(targetVoucherId, Math.max(refreshedDueCents, 0));
+        return Math.max(refreshedDueCents, 0);
+      };
+
+      const insertPaymentAllocation = async (targetVoucherId, allocationAmountCents, paymentDate) => {
+        await client.query('SAVEPOINT sp_fee_payment_alloc');
+        try {
+          const inserted = await client.query(
+            `INSERT INTO fee_payments (voucher_id, amount, payment_date)
+             VALUES ($1, $2, $3)
+             RETURNING *`,
+            [targetVoucherId, this.fromCents(allocationAmountCents), paymentDate]
+          );
+          await client.query('RELEASE SAVEPOINT sp_fee_payment_alloc');
+          return inserted;
+        } catch (error) {
+          await client.query('ROLLBACK TO SAVEPOINT sp_fee_payment_alloc');
+          await client.query('RELEASE SAVEPOINT sp_fee_payment_alloc');
+          throw error;
+        }
+      };
+
+      const requestedCents = this.toCents(amount);
+
+      if (requestedCents <= 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(
           res,
-          `Payment amount (${amount}) exceeds due amount (${totalAllocatableDue})`,
+          'Payment amount must be greater than zero',
           400
         );
       }
 
-      let remainingAmount = this.toAmount(amount);
-      const insertedPayments = [];
-      const paymentDateValue = payment_date || new Date();
+      const totalAllocatableDueCents = orderedUniqueVouchers.reduce(
+        (sum, row) => sum + (liveDueByVoucher.get(row.voucher_id) || 0),
+        0
+      );
 
-      for (const voucher of vouchersToAllocate) {
-        if (remainingAmount <= 0) break;
-
-        const voucherDue = this.toAmount(voucher.due_amount);
-        if (voucherDue <= 0) continue;
-
-        const allocationAmount = Math.min(remainingAmount, voucherDue);
-        const paymentInsert = await client.query(
-          `INSERT INTO fee_payments (voucher_id, amount, payment_date)
-           VALUES ($1, $2, $3)
-           RETURNING *`,
-          [voucher.voucher_id, allocationAmount, paymentDateValue]
+      if (requestedCents > totalAllocatableDueCents) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          `Payment amount (Rs. ${this.fromCents(requestedCents).toFixed(2)}) exceeds allocatable due (Rs. ${this.fromCents(totalAllocatableDueCents).toFixed(2)}).`,
+          400
         );
+      }
 
-        insertedPayments.push(paymentInsert.rows[0]);
-        remainingAmount -= allocationAmount;
+      let remainingAmountCents = requestedCents;
+      const paymentDateValue = payment_date || new Date();
+      const insertedPayments = [];
+      const skippedVoucherIds = [];
+
+      for (const voucher of orderedUniqueVouchers) {
+        if (remainingAmountCents <= 0) break;
+
+        let voucherDueCents = liveDueByVoucher.get(voucher.voucher_id) || 0;
+        if (voucherDueCents <= 0) continue;
+
+        let allocationAmountCents = Math.min(remainingAmountCents, voucherDueCents);
+
+        try {
+          const paymentInsert = await insertPaymentAllocation(
+            voucher.voucher_id,
+            allocationAmountCents,
+            paymentDateValue
+          );
+
+          insertedPayments.push(paymentInsert.rows[0]);
+          remainingAmountCents -= allocationAmountCents;
+          liveDueByVoucher.set(voucher.voucher_id, Math.max(voucherDueCents - allocationAmountCents, 0));
+        } catch (insertError) {
+          const insertMessage = `${insertError?.message || ''}`;
+          const isOverBaseError = /exceed voucher .* base total|exceeds base total/i.test(insertMessage);
+
+          if (!isOverBaseError) {
+            throw insertError;
+          }
+
+          voucherDueCents = await refreshVoucherLiveDueCents(voucher.voucher_id);
+
+          if (voucherDueCents <= 0) {
+            skippedVoucherIds.push(voucher.voucher_id);
+            continue;
+          }
+
+          allocationAmountCents = Math.min(remainingAmountCents, voucherDueCents);
+
+          try {
+            const retriedInsert = await insertPaymentAllocation(
+              voucher.voucher_id,
+              allocationAmountCents,
+              paymentDateValue
+            );
+
+            insertedPayments.push(retriedInsert.rows[0]);
+            remainingAmountCents -= allocationAmountCents;
+            liveDueByVoucher.set(voucher.voucher_id, Math.max(voucherDueCents - allocationAmountCents, 0));
+          } catch (retryError) {
+            const retryMessage = `${retryError?.message || ''}`;
+            const retryOverBase = /exceed voucher .* base total|exceeds base total/i.test(retryMessage);
+
+            if (!retryOverBase) {
+              throw retryError;
+            }
+
+            liveDueByVoucher.set(voucher.voucher_id, 0);
+            skippedVoucherIds.push(voucher.voucher_id);
+            continue;
+          }
+        }
+      }
+
+      if (remainingAmountCents > 0) {
+        await client.query('ROLLBACK');
+        const skippedPart = skippedVoucherIds.length > 0
+          ? ` Skipped vouchers after over-base checks: ${[...new Set(skippedVoucherIds)].join(', ')}.`
+          : '';
+        return ApiResponse.error(
+          res,
+          `Payment could not be fully allocated after checking all eligible vouchers. Remaining amount: ${this.fromCents(remainingAmountCents).toFixed(2)}.${skippedPart}`,
+          400
+        );
+      }
+
+      const touchedVoucherIds = [
+        ...new Set(
+          insertedPayments
+            .map((payment) => parseInt(payment.voucher_id, 10))
+            .filter((id) => Number.isFinite(id))
+        )
+      ];
+
+      const integrityCheck = await client.query(
+        `WITH base_totals AS (
+           SELECT v.id as voucher_id,
+                  COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total
+           FROM fee_vouchers v
+           LEFT JOIN fee_voucher_items vi ON vi.voucher_id = v.id
+           WHERE v.id = ANY($1::int[])
+           GROUP BY v.id
+         ),
+         paid_totals AS (
+           SELECT v.id as voucher_id,
+                  COALESCE(SUM(fp.amount), 0) as paid_total
+           FROM fee_vouchers v
+           LEFT JOIN fee_payments fp ON fp.voucher_id = v.id
+           WHERE v.id = ANY($1::int[])
+           GROUP BY v.id
+         )
+         SELECT bt.voucher_id, bt.base_total, COALESCE(pt.paid_total, 0) as paid_total
+         FROM base_totals bt
+         LEFT JOIN paid_totals pt ON pt.voucher_id = bt.voucher_id
+         WHERE COALESCE(pt.paid_total, 0) > bt.base_total
+         LIMIT 1`,
+        [touchedVoucherIds]
+      );
+
+      if (integrityCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          'Payment would create negative outstanding. Operation cancelled.',
+          400
+        );
       }
 
       await this.resyncStudentVoucherDues(client, selectedVoucher.student_id);
@@ -266,7 +472,8 @@ class FeesController {
   async getVoucherStatus(client, voucherId) {
     const result = await client.query(
       `WITH VoucherTotals AS (
-         SELECT voucher_id, SUM(amount) as total_fee
+         SELECT voucher_id,
+                COALESCE(SUM(CASE WHEN item_type <> 'ARREARS' THEN amount ELSE 0 END), 0) as total_fee
          FROM fee_voucher_items
          WHERE voucher_id = $1
          GROUP BY voucher_id
@@ -285,7 +492,7 @@ class FeesController {
               sec.name as section_name,
               COALESCE(vt.total_fee, 0) as total_fee,
               COALESCE(pt.paid_amount, 0) as paid_amount,
-              COALESCE(vt.total_fee, 0) - COALESCE(pt.paid_amount, 0) as due_amount,
+              GREATEST(COALESCE(vt.total_fee, 0) - COALESCE(pt.paid_amount, 0), 0) as due_amount,
               CASE 
                 WHEN COALESCE(vt.total_fee, 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
                 WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
@@ -391,10 +598,11 @@ class FeesController {
         paramCount++;
       }
 
-      if (month) {
-        const normalizedMonth = /^\d{4}-\d{2}$/.test(month)
-          ? `${month}-01`
-          : month;
+      const normalizedMonth = month
+        ? (/^\d{4}-\d{2}$/.test(month) ? `${month}-01` : month)
+        : null;
+
+      if (normalizedMonth) {
         query += ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $${paramCount}::date)`;
         params.push(normalizedMonth);
         paramCount++;
@@ -415,7 +623,7 @@ class FeesController {
       query += ` GROUP BY p.id, s.name, s.roll_no, c.name, sec.name, v.month`;
 
       // Count total
-      const countQuery = `
+      let countQuery = `
         SELECT COUNT(DISTINCT p.id) as count
         FROM fee_payments p
         JOIN fee_vouchers v ON p.voucher_id = v.id
@@ -424,15 +632,48 @@ class FeesController {
         JOIN classes c ON sch.class_id = c.id
         JOIN sections sec ON sch.section_id = sec.id
         WHERE 1=1
-        ${student_id ? ` AND s.id = ${student_id}` : ''}
-        ${class_id ? ` AND c.id = ${class_id}` : ''}
-        ${section_id ? ` AND sec.id = ${section_id}` : ''}
-        ${month ? ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', '${/^\d{4}-\d{2}$/.test(month) ? `${month}-01` : month}'::date)` : ''}
-        ${from_date ? ` AND p.payment_date >= '${from_date}'` : ''}
-        ${to_date ? ` AND p.payment_date <= '${to_date}'` : ''}
       `;
 
-      const countResult = await client.query(countQuery);
+      const countParams = [];
+      let countParamCount = 1;
+
+      if (student_id) {
+        countQuery += ` AND s.id = $${countParamCount}`;
+        countParams.push(student_id);
+        countParamCount++;
+      }
+
+      if (class_id) {
+        countQuery += ` AND c.id = $${countParamCount}`;
+        countParams.push(class_id);
+        countParamCount++;
+      }
+
+      if (section_id) {
+        countQuery += ` AND sec.id = $${countParamCount}`;
+        countParams.push(section_id);
+        countParamCount++;
+      }
+
+      if (normalizedMonth) {
+        countQuery += ` AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $${countParamCount}::date)`;
+        countParams.push(normalizedMonth);
+        countParamCount++;
+      }
+
+      if (from_date) {
+        countQuery += ` AND p.payment_date >= $${countParamCount}`;
+        countParams.push(from_date);
+        countParamCount++;
+      }
+
+      if (to_date) {
+        countQuery += ` AND p.payment_date <= $${countParamCount}`;
+        countParams.push(to_date);
+        countParamCount++;
+      }
+
+      const countResult = await client.query(countQuery, countParams);
       const total = parseInt(countResult.rows[0].count);
 
       // Add ordering
@@ -505,7 +746,7 @@ class FeesController {
             v.id as voucher_id,
             v.month,
             v.due_date,
-            COALESCE(SUM(vi.amount), 0) as voucher_total,
+            COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as voucher_total,
             COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.voucher_id = v.id), 0) as paid_total
           FROM fee_vouchers v
           JOIN student_class_history sch ON v.student_class_history_id = sch.id
@@ -635,12 +876,15 @@ class FeesController {
                 v.created_at,
                 c.name as class_name,
                 sec.name as section_name,
-                (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as total_fee,
+                (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as total_fee,
                 (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) as paid_amount,
-                (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) -
-                (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) as due_amount,
+                GREATEST(
+                  (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) -
+                  (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id),
+                  0
+                ) as due_amount,
                 CASE 
-                  WHEN (SELECT COALESCE(SUM(vi.amount), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) <= 
+                  WHEN (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) <= 
                        (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) THEN 'PAID'
                   WHEN (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) > 0 THEN 'PARTIAL'
                   ELSE 'UNPAID'
@@ -785,14 +1029,14 @@ class FeesController {
             v.id as voucher_id,
             sch.student_id,
             c.id as class_id,
-            SUM(vi.amount) as voucher_total,
+            SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END) as voucher_total,
             COALESCE((
               SELECT SUM(p.amount) 
               FROM fee_payments p 
               WHERE p.voucher_id = v.id ${dateFilter}
             ), 0) as paid_total,
             CASE 
-              WHEN SUM(vi.amount) <= COALESCE((
+              WHEN SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END) <= COALESCE((
                 SELECT SUM(p2.amount) 
                 FROM fee_payments p2 
                 WHERE p2.voucher_id = v.id
@@ -823,7 +1067,7 @@ class FeesController {
           COUNT(DISTINCT CASE WHEN status = 'PARTIAL' THEN voucher_id END) as partial_vouchers,
           COALESCE(SUM(voucher_total), 0) as total_fee_generated,
           COALESCE(SUM(paid_total), 0) as total_collected,
-          COALESCE(SUM(voucher_total) - SUM(paid_total), 0) as total_pending,
+          COALESCE(SUM(GREATEST(voucher_total - paid_total, 0)), 0) as total_pending,
           (SELECT total_payments FROM payment_counts) as total_payments,
           COUNT(DISTINCT student_id) as total_students
         FROM voucher_totals

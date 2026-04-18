@@ -193,6 +193,7 @@ class VouchersController {
 
       const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
@@ -933,10 +934,14 @@ class VouchersController {
                sec.name as section_name,
                CASE WHEN latest_voucher.voucher_id = v.id THEN true ELSE false END as is_latest_for_student,
                COALESCE(SUM(vi.amount), 0) as total_fee,
+               COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
                COALESCE(MAX(p.paid_total), 0) as paid_amount,
-               COALESCE(SUM(vi.amount), 0) - COALESCE(MAX(p.paid_total), 0) as due_amount,
+               GREATEST(
+                 COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) - COALESCE(MAX(p.paid_total), 0),
+                 0
+               ) as due_amount,
                CASE 
-                 WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
+                 WHEN COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
                  WHEN COALESCE(MAX(p.paid_total), 0) > 0 THEN 'PARTIAL'
                  ELSE 'UNPAID'
                END as status,
@@ -1015,9 +1020,9 @@ class VouchersController {
       // Apply status filter after grouping
       if (status) {
         const statusMap = {
-          'PAID': 'COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0)',
+          'PAID': "COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(MAX(p.paid_total), 0)",
           'UNPAID': 'COALESCE(MAX(p.paid_total), 0) = 0',
-          'PARTIAL': 'COALESCE(MAX(p.paid_total), 0) > 0 AND COALESCE(SUM(vi.amount), 0) > COALESCE(MAX(p.paid_total), 0)'
+          'PARTIAL': "COALESCE(MAX(p.paid_total), 0) > 0 AND COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) > COALESCE(MAX(p.paid_total), 0)"
         };
         if (statusMap[status.toUpperCase()]) {
           query += ` HAVING ${statusMap[status.toUpperCase()]}`;
@@ -1131,10 +1136,14 @@ class VouchersController {
               FROM fee_payments p
               WHERE p.voucher_id = v.id) as payments,
               COALESCE(SUM(vi.amount), 0) as total_fee,
+              COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
               COALESCE(pt.paid_amount, 0) as paid_amount,
-              COALESCE(SUM(vi.amount), 0) - COALESCE(pt.paid_amount, 0) as due_amount,
+              GREATEST(
+                COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) - COALESCE(pt.paid_amount, 0),
+                0
+              ) as due_amount,
               CASE 
-                WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
+                WHEN COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
                 WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
                 ELSE 'UNPAID'
               END as status
@@ -1171,7 +1180,11 @@ class VouchersController {
         items: Joi.array().items(
           Joi.object({
             item_type: Joi.string().valid('MONTHLY','ADMISSION','PAPER_FUND','TRANSPORT','DISCOUNT','ARREARS','CUSTOM','YEARLY_PACKAGE').required(),
-            amount: Joi.number().min(0).required(),
+            amount: Joi.number().when('item_type', {
+              is: 'DISCOUNT',
+              then: Joi.number().max(0).required(),
+              otherwise: Joi.number().min(0).required()
+            }),
             description: Joi.string().optional().allow('', null)
           })
         ).min(1).required()
@@ -1179,6 +1192,7 @@ class VouchersController {
 
       const { error } = schema.validate(req.body, { stripUnknown: true });
       if (error) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, error.details[0].message, 400);
       }
 
@@ -1199,8 +1213,18 @@ class VouchersController {
       );
 
       if (voucherCheck.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Voucher not found', 404);
       }
+
+      await client.query(
+        `SELECT v.id
+         FROM fee_vouchers v
+         JOIN student_class_history sch ON v.student_class_history_id = sch.id
+         WHERE sch.student_id = $1
+         FOR UPDATE`,
+        [voucherCheck.rows[0].student_id]
+      );
 
       // Allow editing yearly college vouchers even with payments (package amount revision)
       // Block editing only for MONTHLY vouchers that already have payments
@@ -1208,6 +1232,7 @@ class VouchersController {
         parseFloat(voucherCheck.rows[0].paid_amount) > 0 &&
         voucherCheck.rows[0].voucher_type !== 'YEARLY_COLLEGE'
       ) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(
           res,
           'Cannot modify items for a voucher that has payments',
@@ -1239,6 +1264,42 @@ class VouchersController {
       }
 
       await this.resyncStudentVoucherDues(client, voucherCheck.rows[0].student_id);
+
+      const integrityCheck = await client.query(
+        `WITH base_totals AS (
+           SELECT v.id as voucher_id,
+                  COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total
+           FROM fee_vouchers v
+           JOIN student_class_history sch ON v.student_class_history_id = sch.id
+           LEFT JOIN fee_voucher_items vi ON vi.voucher_id = v.id
+           WHERE sch.student_id = $1
+           GROUP BY v.id
+         ),
+         paid_totals AS (
+           SELECT v.id as voucher_id,
+                  COALESCE(SUM(fp.amount), 0) as paid_total
+           FROM fee_vouchers v
+           JOIN student_class_history sch ON v.student_class_history_id = sch.id
+           LEFT JOIN fee_payments fp ON fp.voucher_id = v.id
+           WHERE sch.student_id = $1
+           GROUP BY v.id
+         )
+         SELECT bt.voucher_id, bt.base_total, COALESCE(pt.paid_total, 0) as paid_total
+         FROM base_totals bt
+         LEFT JOIN paid_totals pt ON pt.voucher_id = bt.voucher_id
+         WHERE COALESCE(pt.paid_total, 0) > bt.base_total
+         LIMIT 1`,
+        [voucherCheck.rows[0].student_id]
+      );
+
+      if (integrityCheck.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          'Voucher update would create negative outstanding. Operation cancelled.',
+          400
+        );
+      }
 
       await client.query('COMMIT');
 

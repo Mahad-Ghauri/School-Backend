@@ -4,48 +4,25 @@ const studentsController = require('../controllers/students.controller');
 const { authenticate } = require('../middleware/auth.middleware');
 const { staffOnly, adminOnly } = require('../middleware/role.middleware');
 
-// Bulk import - NO AUTH for testing (place BEFORE authentication middleware)
-router.post('/bulk', studentsController.bulkCreate);
-router.post('/bulk-update', studentsController.bulkUpdate); // Update existing students with missing data
-
-// Bulk operations - NO AUTH for testing - Multiple methods supported
-router.post('/bulk-deactivate', studentsController.bulkDeactivate);
-router.post('/bulk-delete', studentsController.bulkDelete);
-router.delete('/bulk-delete', studentsController.bulkDelete); // Support both POST and DELETE
-
-// Individual permanent delete - NO AUTH (consistent with bulk-delete pattern)
-router.delete('/:id', studentsController.deleteOne);
-
-// Mark/Unmark students as fee-free - NO AUTH for testing
-router.post('/mark-free', studentsController.markFree);
-router.post('/unmark-free', studentsController.unmarkFree);
-
-// Update basic student info - NO AUTH for testing
-router.patch('/:id/basic-info', studentsController.updateBasicInfo);
-
-// Test endpoints to verify no auth
-router.get('/test', (req, res) => {
-  res.json({ message: 'Test endpoint working - no auth required' });
-});
-
-router.post('/test-bulk-delete', (req, res) => {
-  console.log('🧪 Test bulk delete called with:', req.body);
-  res.json({ 
-    message: 'Test bulk delete endpoint reached', 
-    receivedData: req.body,
-    timestamp: new Date().toISOString()
-  });
-});
-
 // All routes below require authentication
 router.use(authenticate);
 router.use(staffOnly);
+
+// Bulk operations
+router.post('/bulk', adminOnly, studentsController.bulkCreate);
+router.post('/bulk-update', adminOnly, studentsController.bulkUpdate);
+router.post('/bulk-deactivate', adminOnly, studentsController.bulkDeactivate);
+router.post('/bulk-delete', adminOnly, studentsController.bulkDelete);
+router.delete('/bulk-delete', adminOnly, studentsController.bulkDelete);
+router.post('/mark-free', adminOnly, studentsController.markFree);
+router.post('/unmark-free', adminOnly, studentsController.unmarkFree);
 
 // CRUD operations
 router.post('/', adminOnly, studentsController.create);
 router.get('/', studentsController.list);
 router.get('/:id', studentsController.getById);
 router.put('/:id', adminOnly, studentsController.update);
+router.delete('/:id', adminOnly, studentsController.deleteOne);
 router.patch('/:id/basic-info', studentsController.updateBasicInfo); // Update basic info (no admin required)
 
 // Enrollment operations
