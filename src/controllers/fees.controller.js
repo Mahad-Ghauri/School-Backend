@@ -747,7 +747,12 @@ class FeesController {
             v.month,
             v.due_date,
             COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as voucher_total,
-            COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.voucher_id = v.id), 0) as paid_total
+            COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.voucher_id = v.id), 0) as paid_total,
+            GREATEST(
+              COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) -
+              COALESCE((SELECT SUM(p.amount) FROM fee_payments p WHERE p.voucher_id = v.id), 0),
+              0
+            ) as due_amount
           FROM fee_vouchers v
           JOIN student_class_history sch ON v.student_class_history_id = sch.id
           LEFT JOIN fee_voucher_items vi ON vi.voucher_id = v.id
@@ -755,24 +760,16 @@ class FeesController {
             ${voucherMonthFilterClause}
           GROUP BY sch.student_id, v.id, v.month, v.due_date
         ),
-        outstanding_counts AS (
+        student_financials AS (
           SELECT
             student_id,
-            COUNT(*) FILTER (WHERE GREATEST(voucher_total - paid_total, 0) > 0) as total_vouchers
+            COUNT(*) FILTER (WHERE due_amount > 0) as total_vouchers,
+            COALESCE(SUM(voucher_total), 0) as total_fee,
+            COALESCE(SUM(paid_total), 0) as paid_amount,
+            COALESCE(SUM(due_amount), 0) as due_amount,
+            BOOL_OR(due_amount > 0 AND due_date IS NOT NULL AND due_date < CURRENT_DATE) as has_overdue_due
           FROM voucher_financials
           GROUP BY student_id
-        ),
-        latest_voucher AS (
-          SELECT DISTINCT ON (vf.student_id)
-            vf.student_id,
-            vf.voucher_id,
-            vf.month,
-            vf.due_date,
-            vf.voucher_total,
-            vf.paid_total,
-            GREATEST(vf.voucher_total - vf.paid_total, 0) as due_amount
-          FROM voucher_financials vf
-          ORDER BY vf.student_id, vf.month DESC, vf.voucher_id DESC
         )
         SELECT
           s.id as student_id,
@@ -784,19 +781,19 @@ class FeesController {
           c.name as class_name,
           sec.id as section_id,
           sec.name as section_name,
-          oc.total_vouchers,
-          lv.voucher_total as total_fee,
-          lv.paid_total as paid_amount,
-          lv.due_amount as due_amount
+          sf.total_vouchers,
+          sf.total_fee,
+          sf.paid_amount,
+          sf.due_amount,
+          sf.has_overdue_due
         FROM students s
         JOIN student_class_history sch_curr
           ON s.id = sch_curr.student_id AND sch_curr.end_date IS NULL
         JOIN classes c ON sch_curr.class_id = c.id
         JOIN sections sec ON sch_curr.section_id = sec.id
-        JOIN outstanding_counts oc ON oc.student_id = s.id
-        JOIN latest_voucher lv ON lv.student_id = s.id
+        JOIN student_financials sf ON sf.student_id = s.id
         WHERE s.is_active = true
-          AND lv.due_amount > 0
+          AND sf.due_amount > 0
       `;
 
       if (class_id) {
@@ -813,16 +810,16 @@ class FeesController {
 
       // Filter by overdue latest voucher only
       if (overdue_only === 'true') {
-        query += ` AND lv.due_date IS NOT NULL AND lv.due_date < CURRENT_DATE`;
+        query += ` AND sf.has_overdue_due = true`;
       }
 
       if (min_due_amount > 0) {
-        query += ` AND lv.due_amount >= $${paramCount}`;
+        query += ` AND sf.due_amount >= $${paramCount}`;
         params.push(min_due_amount);
         paramCount++;
       }
 
-      query += ` ORDER BY due_amount DESC, s.name`;
+      query += ` ORDER BY sf.due_amount DESC, s.name`;
 
       const result = await client.query(query, params);
 
