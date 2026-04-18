@@ -271,9 +271,7 @@ class PDFService {
     items.forEach(item => {
       const amount = parseFloat(item.amount);
       totalAmount += amount;
-      if (item.item_type !== 'ARREARS') {
-        billableAmount += amount;
-      }
+      billableAmount += amount;
       const feeLabel = (() => {
         if (item.item_type === 'CUSTOM' && item.description) return item.description;
         if (item.item_type === 'ARREARS') return item.description || 'Dues';
@@ -298,12 +296,16 @@ class PDFService {
 
     // Show paid/pending totals
     const paidAmt = parseFloat(voucherData.paid_amount) || 0;
-    const pendingAmt = Math.max(billableAmount - paidAmt, 0);
+    const explicitBalance = parseFloat(voucherData.balance);
+    const pendingAmt = Number.isFinite(explicitBalance)
+      ? Math.max(explicitBalance, 0)
+      : Math.max(billableAmount - paidAmt, 0);
+    const isFullyPaid = pendingAmt <= 0.009;
     if (paidAmt > 0) {
       doc.moveTo(contentX, currentY).lineTo(contentX + contentWidth, currentY).stroke();
       currentY += midGap;
 
-      if (paidAmt < billableAmount) {
+      if (!isFullyPaid) {
         doc.fontSize(tableBodyFont).font('Helvetica-Bold');
         doc.fillColor('#059669').text('Paid:', contentX, currentY);
         doc.text(`Rs. ${paidAmt.toFixed(0)}`, contentX + contentWidth - 55, currentY, { width: 55, align: 'right' });
@@ -353,8 +355,8 @@ class PDFService {
     }
 
     // Compact summary block to avoid large empty areas in low-item vouchers.
-    const statusText = pendingAmt <= 0 ? 'PAID' : paidAmt > 0 ? 'PARTIAL' : 'UNPAID';
-    const statusColor = pendingAmt <= 0 ? '#059669' : paidAmt > 0 ? '#d97706' : '#dc2626';
+    const statusText = isFullyPaid ? 'PAID' : paidAmt > 0 ? 'PARTIAL' : 'UNPAID';
+    const statusColor = isFullyPaid ? '#059669' : paidAmt > 0 ? '#d97706' : '#dc2626';
     if (currentY < voucherBottomY - fs(40) && payments.length === 0) {
       doc.moveTo(contentX, currentY).lineTo(contentX + contentWidth, currentY).stroke();
       currentY += midGap;
@@ -388,7 +390,7 @@ class PDFService {
     });
     
     // Add "PAID" watermark if voucher is fully paid
-    if (billableAmount > 0 && voucherData.paid_amount && voucherData.paid_amount >= billableAmount) {
+    if (billableAmount > 0 && isFullyPaid) {
       doc.save();
       
       // Calculate center position for the watermark
@@ -553,7 +555,7 @@ class PDFService {
       // Calculate totals
       const totalAmount = itemsResult.rows.reduce((sum, item) => sum + parseFloat(item.amount), 0);
       const billableAmount = itemsResult.rows.reduce(
-        (sum, item) => (item.item_type === 'ARREARS' ? sum : sum + parseFloat(item.amount)),
+        (sum, item) => sum + parseFloat(item.amount),
         0
       );
       const totalPaid = paymentsResult.rows.reduce((sum, payment) => sum + parseFloat(payment.amount), 0);
@@ -699,8 +701,9 @@ class PDFService {
       y += 46;
 
       // Show paid/pending for partial payments
-      if (voucherData.paid_amount > 0 && voucherData.paid_amount < voucherData.billable_amount) {
-        const pendingAmount = Math.max(voucherData.billable_amount - voucherData.paid_amount, 0);
+      const isFullyPaid = (voucherData.balance || 0) <= 0.009;
+      if (voucherData.paid_amount > 0 && !isFullyPaid) {
+        const pendingAmount = Math.max(voucherData.balance || 0, 0);
         doc.fontSize(11).font('Helvetica-Bold');
         doc.fillColor('#059669').text('Paid Amount:', 50, y);
         doc.text(`Rs. ${voucherData.paid_amount.toFixed(0)}`, 450, y, { width: 100, align: 'right' });
@@ -788,7 +791,7 @@ class PDFService {
          .text('This is a computer-generated document.', 50, 765, { align: 'center', italic: true });
 
       // Add "PAID" watermark if voucher is fully paid
-      if (voucherData.billable_amount > 0 && voucherData.paid_amount >= voucherData.billable_amount) {
+      if (voucherData.billable_amount > 0 && (voucherData.balance || 0) <= 0.009) {
         doc.save();
         
         // Position watermark in center of page

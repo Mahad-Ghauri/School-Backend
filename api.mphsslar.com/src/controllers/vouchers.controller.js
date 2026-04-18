@@ -903,11 +903,11 @@ class VouchersController {
                COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
                COALESCE(MAX(p.paid_total), 0) as paid_amount,
                GREATEST(
-                 COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) - COALESCE(MAX(p.paid_total), 0),
+                 COALESCE(SUM(vi.amount), 0) - COALESCE(MAX(p.paid_total), 0),
                  0
                ) as due_amount,
                CASE 
-                 WHEN COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
+                 WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0) THEN 'PAID'
                  WHEN COALESCE(MAX(p.paid_total), 0) > 0 THEN 'PARTIAL'
                  ELSE 'UNPAID'
                END as status,
@@ -972,9 +972,9 @@ class VouchersController {
       // Apply status filter after grouping
       if (status) {
         const statusMap = {
-          'PAID': "COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(MAX(p.paid_total), 0)",
+          'PAID': 'COALESCE(SUM(vi.amount), 0) <= COALESCE(MAX(p.paid_total), 0)',
           'UNPAID': 'COALESCE(MAX(p.paid_total), 0) = 0',
-          'PARTIAL': "COALESCE(MAX(p.paid_total), 0) > 0 AND COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) > COALESCE(MAX(p.paid_total), 0)"
+          'PARTIAL': 'COALESCE(MAX(p.paid_total), 0) > 0 AND COALESCE(SUM(vi.amount), 0) > COALESCE(MAX(p.paid_total), 0)'
         };
         if (statusMap[status.toUpperCase()]) {
           query += ` HAVING ${statusMap[status.toUpperCase()]}`;
@@ -1088,11 +1088,11 @@ class VouchersController {
               COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
               COALESCE(pt.paid_amount, 0) as paid_amount,
               GREATEST(
-                COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) - COALESCE(pt.paid_amount, 0),
+                COALESCE(SUM(vi.amount), 0) - COALESCE(pt.paid_amount, 0),
                 0
               ) as due_amount,
               CASE 
-                WHEN COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
+                WHEN COALESCE(SUM(vi.amount), 0) <= COALESCE(pt.paid_amount, 0) THEN 'PAID'
                 WHEN COALESCE(pt.paid_amount, 0) > 0 THEN 'PARTIAL'
                 ELSE 'UNPAID'
               END as status
@@ -1284,6 +1284,7 @@ class VouchersController {
       );
 
       if (parseInt(paymentCheck.rows[0].payment_count) > 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(
           res,
           'Cannot delete voucher with existing payments. Delete payments first.',
@@ -1291,15 +1292,22 @@ class VouchersController {
         );
       }
 
-      // Delete voucher (items will cascade delete automatically)
+      // Delete voucher and fetch owning student for dues resync.
       const result = await client.query(
-        'DELETE FROM fee_vouchers WHERE id = $1 RETURNING *',
+        `DELETE FROM fee_vouchers v
+         USING student_class_history sch
+         WHERE v.id = $1
+           AND v.student_class_history_id = sch.id
+         RETURNING v.*, sch.student_id`,
         [id]
       );
 
       if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
         return ApiResponse.error(res, 'Voucher not found', 404);
       }
+
+      await this.resyncStudentVoucherDues(client, result.rows[0].student_id);
 
       await client.query('COMMIT');
 
@@ -1324,6 +1332,11 @@ class VouchersController {
       const pdfService = require('../services/pdf.service');
 
       const { filepath, filename } = await pdfService.generateFeeVoucher(id);
+
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
 
       res.download(filepath, filename, (err) => {
         // Clean up the file after sending
@@ -1355,6 +1368,10 @@ class VouchersController {
       // Set headers for inline display (for printing)
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+      res.setHeader('Surrogate-Control', 'no-store');
 
       const fs = require('fs');
       const fileStream = fs.createReadStream(filepath);
