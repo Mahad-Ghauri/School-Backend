@@ -872,6 +872,7 @@ class FeesController {
       // Get all vouchers with payment status
       const result = await client.query(
         `SELECT v.id as voucher_id,
+                CONCAT('V-', v.id) as voucher_no,
                 v.month,
                 v.created_at,
                 c.name as class_name,
