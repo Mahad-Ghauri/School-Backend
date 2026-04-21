@@ -872,17 +872,19 @@ class FeesController {
                 CONCAT('V-', v.id) as voucher_no,
                 v.month,
                 v.created_at,
+          v.voucher_type,
                 c.name as class_name,
+          c.class_type,
                 sec.name as section_name,
-                (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as total_fee,
+                (SELECT COALESCE(SUM(CASE WHEN vi.item_type = 'ARREARS' THEN 0 ELSE COALESCE(vi.amount, 0) END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) as total_fee,
                 (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) as paid_amount,
                 GREATEST(
-                  (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) -
+                  (SELECT COALESCE(SUM(CASE WHEN vi.item_type = 'ARREARS' THEN 0 ELSE COALESCE(vi.amount, 0) END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) -
                   (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id),
                   0
                 ) as due_amount,
                 CASE 
-                  WHEN (SELECT COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) <= 
+                  WHEN (SELECT COALESCE(SUM(CASE WHEN vi.item_type = 'ARREARS' THEN 0 ELSE COALESCE(vi.amount, 0) END), 0) FROM fee_voucher_items vi WHERE vi.voucher_id = v.id) <= 
                        (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) THEN 'PAID'
                   WHEN (SELECT COALESCE(SUM(fp.amount), 0) FROM fee_payments fp WHERE fp.voucher_id = v.id) > 0 THEN 'PARTIAL'
                   ELSE 'UNPAID'
@@ -893,6 +895,7 @@ class FeesController {
                   'description', vi.description,
                   'item_label', CASE
                     WHEN vi.item_type = 'ARREARS' THEN COALESCE(vi.description, 'Dues')
+                    WHEN vi.item_type = 'YEARLY_PACKAGE' THEN COALESCE(vi.description, 'Annual Package')
                     ELSE vi.item_type
                   END
                 ))
