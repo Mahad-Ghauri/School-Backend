@@ -521,6 +521,10 @@ class VouchersController {
         );
       }
 
+      // Rebuild ARREARS across all student vouchers so future vouchers stay in sync
+      // when this voucher is generated for an earlier month.
+      await this.resyncStudentVoucherDues(client, student_id);
+
       await client.query('COMMIT');
 
       // Fetch complete voucher details
@@ -849,6 +853,10 @@ class VouchersController {
             });
             continue;
           }
+
+          // Rebuild ARREARS for this student so existing future vouchers include
+          // dues when a back-dated voucher is generated in bulk.
+          await this.resyncStudentVoucherDues(client, student.student_id);
 
           await client.query('RELEASE SAVEPOINT bulk_voucher_student');
 
