@@ -133,16 +133,22 @@ class VouchersController {
 
   async getDuesBreakdownForEnrollment(client, enrollmentId, targetMonth) {
     const duesResult = await client.query(
-      `WITH voucher_financials AS (
+      `WITH target_student AS (
+         SELECT student_id
+         FROM student_class_history
+         WHERE id = $1
+       ),
+       voucher_financials AS (
          SELECT
            v.id as voucher_id,
            v.month,
            COALESCE(SUM(CASE WHEN vi.item_type <> 'ARREARS' THEN vi.amount ELSE 0 END), 0) as base_total,
            COALESCE((SELECT SUM(fp.amount) FROM fee_payments fp WHERE fp.voucher_id = v.id), 0) as paid_total
          FROM fee_vouchers v
+         JOIN student_class_history sch ON sch.id = v.student_class_history_id
+         JOIN target_student ts ON ts.student_id = sch.student_id
          LEFT JOIN fee_voucher_items vi ON v.id = vi.voucher_id
-         WHERE v.student_class_history_id = $1
-           AND DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
+         WHERE DATE_TRUNC('month', v.month) < DATE_TRUNC('month', $2::date)
          GROUP BY v.id, v.month
        )
        SELECT
