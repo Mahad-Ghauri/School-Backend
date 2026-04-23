@@ -173,6 +173,45 @@ class VouchersController {
     }));
   }
 
+  async findExistingMonthlyVoucherForStudentMonth(client, studentId, targetMonth, options = {}) {
+    const parsedMonth = new Date(targetMonth);
+    if (Number.isNaN(parsedMonth.getTime())) {
+      return null;
+    }
+
+    const monthStart = new Date(parsedMonth.getFullYear(), parsedMonth.getMonth(), 1);
+    const params = [studentId, monthStart];
+    const lockRows = options.lockRows === true;
+
+    let query = `
+      SELECT
+        v.id as voucher_id,
+        v.student_class_history_id,
+        v.month,
+        COALESCE(v.voucher_type, 'MONTHLY') as voucher_type,
+        c.id as class_id,
+        c.name as class_name,
+        sec.id as section_id,
+        sec.name as section_name
+      FROM fee_vouchers v
+      JOIN student_class_history sch ON sch.id = v.student_class_history_id
+      JOIN classes c ON c.id = sch.class_id
+      JOIN sections sec ON sec.id = sch.section_id
+      WHERE sch.student_id = $1
+        AND COALESCE(v.voucher_type, 'MONTHLY') = 'MONTHLY'
+        AND DATE_TRUNC('month', v.month) = DATE_TRUNC('month', $2::date)
+    `;
+
+    query += ` ORDER BY v.created_at DESC, v.id DESC LIMIT 1`;
+
+    if (lockRows) {
+      query += ` FOR UPDATE OF v`;
+    }
+
+    const result = await client.query(query, params);
+    return result.rows[0] || null;
+  }
+
   /**
    * Generate fee voucher for a student
    * POST /api/vouchers/generate
@@ -291,22 +330,28 @@ class VouchersController {
         );
       }
 
-      // Duplicate voucher check removed - allowing multiple vouchers per month
-      // const duplicateCheck = await client.query(
-      //   `SELECT id, month FROM fee_vouchers 
-      //    WHERE student_class_history_id = $1 
-      //    AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-      //   [enrollment.id, month]
-      // );
-      //
-      // if (duplicateCheck.rows.length > 0) {
-      //   console.log(`Duplicate voucher check failed for enrollment ${enrollment.id}: Existing voucher ${duplicateCheck.rows[0].id} for month ${duplicateCheck.rows[0].month}`);
-      //   return ApiResponse.error(
-      //     res,
-      //     `Voucher already exists for ${enrollment.student_name} for the specified month`,
-      //     400
-      //   );
-      // }
+      // Enforce a single monthly voucher per student per month across all enrollments.
+      // This prevents post-promotion/transfer duplicate month vouchers (old + new class).
+      const existingMonthlyVoucher = await this.findExistingMonthlyVoucherForStudentMonth(
+        client,
+        student_id,
+        month,
+        { lockRows: true }
+      );
+
+      if (existingMonthlyVoucher) {
+        await client.query('ROLLBACK');
+        return ApiResponse.error(
+          res,
+          `Monthly voucher already exists for ${enrollment.student_name} in ${new Date(month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (${existingMonthlyVoucher.class_name} - ${existingMonthlyVoucher.section_name}).`,
+          409,
+          {
+            existing_voucher_id: existingMonthlyVoucher.voucher_id,
+            existing_class_id: existingMonthlyVoucher.class_id,
+            existing_section_id: existingMonthlyVoucher.section_id,
+          }
+        );
+      }
 
       // Get current fee structure for the class
       const feeStructure = await client.query(
@@ -640,23 +685,22 @@ class VouchersController {
       // Generate voucher for each student
       for (const student of students.rows) {
         try {
-          // Duplicate voucher check removed - allowing multiple vouchers per month
-          // const duplicateCheck = await client.query(
-          //   `SELECT id, month FROM fee_vouchers 
-          //    WHERE student_class_history_id = $1 
-          //    AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-          //   [student.enrollment_id, month]
-          // );
-          //
-          // if (duplicateCheck.rows.length > 0) {
-          //   console.log(`Skipping student ${student.student_name} (${student.student_id}): Voucher ${duplicateCheck.rows[0].id} already exists for month ${duplicateCheck.rows[0].month}`);
-          //   results.skipped.push({
-          //     student_id: student.student_id,
-          //     student_name: student.student_name,
-          //     reason: 'Voucher already exists for this month'
-          //   });
-          //   continue;
-          // }
+          const existingMonthlyVoucher = await this.findExistingMonthlyVoucherForStudentMonth(
+            client,
+            student.student_id,
+            month,
+            { lockRows: true }
+          );
+
+          if (existingMonthlyVoucher) {
+            results.skipped.push({
+              student_id: student.student_id,
+              student_name: student.student_name,
+              reason: `Monthly voucher already exists for this student in ${new Date(month).toLocaleDateString('en-US', { month: 'long', year: 'numeric' })} (${existingMonthlyVoucher.class_name} - ${existingMonthlyVoucher.section_name})`,
+              voucher_id: existingMonthlyVoucher.voucher_id
+            });
+            continue;
+          }
 
           // Get individual monthly fee (already fetched in main query)
           const individualMonthlyFee = student.individual_monthly_fee;
@@ -1499,15 +1543,13 @@ class VouchersController {
       const preview = [];
 
       for (const student of students.rows) {
-        // Check for duplicate voucher for this month
-        const duplicateCheck = await client.query(
-          `SELECT id, month FROM fee_vouchers 
-           WHERE student_class_history_id = $1 
-           AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-          [student.enrollment_id, month]
+        const existingMonthlyVoucher = await this.findExistingMonthlyVoucherForStudentMonth(
+          client,
+          student.student_id,
+          month
         );
 
-        if (duplicateCheck.rows.length > 0) {
+        if (existingMonthlyVoucher) {
           continue; // Skip students who already have a voucher for this month
         }
 
@@ -1757,15 +1799,13 @@ class VouchersController {
       const vouchersData = [];
 
       for (const student of students.rows) {
-        // Check for duplicate voucher for this month
-        const duplicateCheck = await client.query(
-          `SELECT id, month FROM fee_vouchers 
-           WHERE student_class_history_id = $1 
-           AND DATE_TRUNC('month', month) = DATE_TRUNC('month', $2::date)`,
-          [student.enrollment_id, voucherMonth]
+        const existingMonthlyVoucher = await this.findExistingMonthlyVoucherForStudentMonth(
+          client,
+          student.student_id,
+          voucherMonth
         );
 
-        if (duplicateCheck.rows.length > 0) {
+        if (existingMonthlyVoucher) {
           continue; // Skip if voucher already exists
         }
 
