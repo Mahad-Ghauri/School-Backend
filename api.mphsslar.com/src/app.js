@@ -86,6 +86,14 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Root check for Fly and browser visits
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'School Backend API is running successfully'
+  });
+});
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/students', studentsRoutes);
