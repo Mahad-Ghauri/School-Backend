@@ -1,0 +1,20 @@
+# Fly configuration for the backend API.
+# No Tigris or other storage add-ons are declared here.
+
+app = "school-backend"
+primary_region = "sin"
+
+[build]
+  # Fly will auto-detect the Node app from package.json.
+
+[env]
+  NODE_ENV = "production"
+  PORT = "3000"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
